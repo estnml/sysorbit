@@ -2,6 +2,7 @@
 
 mod detail;
 mod label;
+mod live;
 mod musicbox;
 mod palette;
 mod scale;
@@ -24,7 +25,10 @@ use crate::timeline;
 use musicbox::{Layer, MusicBox, Row as Track};
 use scale::Zoom;
 
+/// Polling interval without live updates.
 const REFRESH: Duration = Duration::from_secs(30);
+/// Safety net poll while live updates run, for anything signals miss.
+const REFRESH_LIVE: Duration = Duration::from_secs(300);
 
 pub fn run(host: Arc<dyn Host>) -> iced::Result {
     iced::application(move || App::new(host.clone()), App::update, App::view)
@@ -45,6 +49,7 @@ pub enum Message {
     SetScope(Scope),
     Select(usize),
     Deselect,
+    Live(live::Event),
 }
 
 struct App {
@@ -61,6 +66,7 @@ struct App {
     /// Scope or zoom changed while loading; the result is outdated.
     stale: bool,
     error: Option<String>,
+    live: live::State,
     cache: Cache,
 }
 
@@ -78,6 +84,7 @@ impl App {
             loading: false,
             stale: false,
             error: None,
+            live: live::State::default(),
             cache: Cache::new(),
         };
         let task = app.load();
@@ -93,9 +100,22 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
+        let refresh = match self.live {
+            live::State::Live => REFRESH_LIVE,
+            live::State::Connecting | live::State::Lost(_) => REFRESH,
+        };
+        // Watching needs the unit names, so it starts with the first snapshot.
+        let watch = self
+            .snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.scope == self.scope)
+            .map(|snapshot| live::subscription(&self.host, snapshot))
+            .unwrap_or_else(Subscription::none);
+
         Subscription::batch([
             iced::time::every(self.zoom.tick()).map(|_| Message::Tick),
-            iced::time::every(REFRESH).map(|_| Message::Refresh),
+            iced::time::every(refresh).map(|_| Message::Refresh),
+            watch,
         ])
     }
 
@@ -153,6 +173,7 @@ impl App {
             }
             Message::SetScope(scope) => {
                 self.scope = scope;
+                self.live = live::State::default();
                 self.selected = None;
                 self.snapshot = None;
                 self.rebuild();
@@ -169,6 +190,17 @@ impl App {
                 self.cache.clear();
                 Task::none()
             }
+            Message::Live(event) => match event {
+                live::Event::Connected => {
+                    self.live = live::State::Live;
+                    Task::none()
+                }
+                live::Event::Changed => self.load(),
+                live::Event::Lost(reason) => {
+                    self.live = live::State::Lost(reason);
+                    Task::none()
+                }
+            },
         }
     }
 
@@ -340,10 +372,24 @@ impl App {
             parts.push(error.clone());
         }
 
-        text(parts.join("  ·  "))
-            .size(12)
-            .color(palette::MUTED)
-            .into()
+        let (indicator, color) = match &self.live {
+            live::State::Live => ("● live".to_owned(), palette::CATCH_UP),
+            live::State::Connecting => ("○ connecting".to_owned(), palette::MUTED),
+            live::State::Lost(reason) => (
+                format!(
+                    "○ polling every {}s, live updates unavailable: {reason}",
+                    REFRESH.as_secs()
+                ),
+                palette::NOTE,
+            ),
+        };
+
+        row![
+            text(indicator).size(12).color(color),
+            text(parts.join("  ·  ")).size(12).color(palette::MUTED),
+        ]
+        .spacing(12)
+        .into()
     }
 }
 

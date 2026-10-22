@@ -4,6 +4,7 @@ mod calendar;
 mod capabilities;
 mod journal;
 mod units;
+pub mod watch;
 
 pub mod timespan;
 
