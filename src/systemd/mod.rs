@@ -113,6 +113,9 @@ pub async fn snapshot(host: &dyn Host, scope: Scope, window: Interval) -> Result
 
     for timer in &mut timers {
         timer.runs = runs.remove(&timer.service).unwrap_or_default();
+        if !timer.service_active {
+            journal::finish_dangling(&mut timer.runs);
+        }
         for trigger in &mut timer.calendar {
             trigger.occurrences = occurrences
                 .get(&trigger.expression)

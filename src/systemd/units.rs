@@ -107,10 +107,26 @@ async fn load_timer(
         (a, b) => a.or(b),
     };
 
+    let service = timer.unit().await?;
+    // GetUnit fails for services that are not loaded, which means inactive.
+    let service_active = match manager.get_unit(service.clone()).await {
+        Ok(path) => {
+            let state = UnitProxy::builder(bus)
+                .path(path)
+                .build()
+                .await?
+                .active_state()
+                .await?;
+            matches!(state.as_str(), "active" | "activating" | "reloading")
+        }
+        Err(_) => false,
+    };
+
     Ok(Timer {
         id: unit.id().await?,
         description: unit.description().await?,
-        service: timer.unit().await?,
+        service,
+        service_active,
         active: unit.active_state().await? == "active",
         unit_file_state: unit.unit_file_state().await?,
         calendar,

@@ -55,6 +55,8 @@ pub struct Timer {
     pub id: String,
     pub description: String,
     pub service: String,
+    /// Whether the service is running (or starting) right now.
+    pub service_active: bool,
     pub active: bool,
     /// `enabled`, `disabled`, `static`, ...
     pub unit_file_state: String,

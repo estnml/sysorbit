@@ -56,7 +56,9 @@ pub fn marks(
         .iter()
         .map(|run| Mark::Run {
             start: run.start,
-            end: run.end,
+            // A running run may carry a tentative end from the journal; it
+            // is drawn up to now.
+            end: run.end.filter(|_| run.outcome != Outcome::Running),
             outcome: run.outcome.clone(),
         })
         .collect();
@@ -199,6 +201,7 @@ mod tests {
             id: "cleanup.timer".into(),
             description: String::new(),
             service: "cleanup.service".into(),
+            service_active: false,
             active: true,
             unit_file_state: "enabled".into(),
             calendar: vec![CalendarTrigger {

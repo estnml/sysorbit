@@ -115,23 +115,34 @@ fn assemble_runs(entries: Vec<Entry>) -> HashMap<String, Vec<Run>> {
 
         match id {
             UNIT_STARTING => {
-                if !open {
-                    unit_runs.push(Run {
-                        start: at,
-                        end: None,
-                        outcome: Outcome::Running,
-                    });
+                // The user manager logs no "Deactivated" for finished oneshots;
+                // a new start means the previous run is over.
+                if let Some(run) = unit_runs.last_mut().filter(|_| open) {
+                    run.end = run.end.or(Some(at));
+                    run.outcome = Outcome::Success;
                 }
+                unit_runs.push(Run {
+                    start: at,
+                    end: None,
+                    outcome: Outcome::Running,
+                });
             }
-            // Some services log "Starting" and some do not; "Started" (or
-            // "Finished" for oneshots) may open the run. A oneshot can log it
-            // right after it ended; then it belongs to the run that just ended.
+            // "Started" for long running services, "Finished" for oneshots;
+            // the journal cannot tell them apart. On an open run it records
+            // when the start job finished, kept as a tentative end that
+            // `finish_dangling` uses once the service is known to be inactive.
+            // Without "Starting" logged it opens the run. A oneshot can log
+            // it right after it ended; then it belongs to the run that ended.
             UNIT_STARTED => {
                 let just_ended = unit_runs
                     .last()
                     .and_then(|run| run.end)
                     .is_some_and(|end| at.duration_since(end) < JUST_ENDED);
-                if !open && !just_ended {
+                if open {
+                    if let Some(run) = unit_runs.last_mut() {
+                        run.end = run.end.or(Some(at));
+                    }
+                } else if !just_ended {
                     unit_runs.push(Run {
                         start: at,
                         end: None,
@@ -158,6 +169,18 @@ fn assemble_runs(entries: Vec<Entry>) -> HashMap<String, Vec<Run>> {
     }
 
     runs
+}
+
+/// Settles the last run of a service that is no longer active but whose end
+/// was never logged: it ended when its start job finished, or right away.
+pub fn finish_dangling(runs: &mut [Run]) {
+    if let Some(run) = runs
+        .last_mut()
+        .filter(|run| run.outcome == Outcome::Running)
+    {
+        run.end = run.end.or(Some(run.start));
+        run.outcome = Outcome::Success;
+    }
 }
 
 /// Ends the open run, or records an instant run when its start was not logged.
@@ -385,6 +408,27 @@ IDX  BOOT ID                          FIRST ENTRY                 LAST ENTRY
         let boots = parse_boots_text(old);
         assert_eq!(boots.len(), 1);
         assert_eq!(boots[0].end.to_string(), "2026-06-05T12:44:42Z");
+    }
+
+    #[test]
+    fn user_manager_runs_close_on_next_start() {
+        // The user manager logs "Starting" and "Finished", never "Deactivated".
+        let mut runs = assemble_runs(vec![
+            entry(1_000_000, UNIT_STARTING, None),
+            entry(1_200_000, UNIT_STARTED, None),
+            entry(61_000_000, UNIT_STARTING, None),
+            entry(61_300_000, UNIT_STARTED, None),
+        ])
+        .remove("backup.service")
+        .unwrap();
+
+        assert_eq!(runs[0].outcome, Outcome::Success);
+        assert_eq!(runs[0].end.unwrap().as_microsecond(), 1_200_000);
+        assert_eq!(runs[1].outcome, Outcome::Running);
+
+        finish_dangling(&mut runs);
+        assert_eq!(runs[1].outcome, Outcome::Success);
+        assert_eq!(runs[1].end.unwrap().as_microsecond(), 61_300_000);
     }
 
     #[test]
