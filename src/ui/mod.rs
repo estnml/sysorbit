@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use iced::widget::canvas::{Cache, Canvas};
-use iced::widget::{Row, button, column, container, responsive, row, scrollable, space, text};
+use iced::widget::{
+    Row, button, column, container, responsive, row, scrollable, space, stack, text,
+};
 use iced::{Element, Length, Subscription, Task, Theme};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
@@ -19,7 +21,7 @@ use crate::host::Host;
 use crate::model::{Scope, Snapshot};
 use crate::systemd;
 use crate::timeline;
-use musicbox::{MusicBox, Row as Track};
+use musicbox::{Layer, MusicBox, Row as Track};
 use scale::Zoom;
 
 const REFRESH: Duration = Duration::from_secs(30);
@@ -233,23 +235,33 @@ impl App {
 
             let rows = musicbox::height(self.tracks.len());
             let music_box = responsive(move |size| {
-                let canvas = Canvas::new(MusicBox {
-                    rows: &self.tracks,
-                    downtime,
-                    zoom: self.zoom,
-                    now: self.now,
-                    tz: &self.tz,
-                    selected,
-                    cache: &self.cache,
-                })
-                .height(rows);
-
                 // Below the minimum width the box keeps its size and scrolls
                 // sideways; scrolling content must not fill its scroll axis.
-                if size.width >= musicbox::MIN_WIDTH {
-                    scrollable(canvas.width(Length::Fill)).into()
+                let width = if size.width >= musicbox::MIN_WIDTH {
+                    Length::Fill
                 } else {
-                    scrollable(canvas.width(musicbox::MIN_WIDTH))
+                    Length::Fixed(musicbox::MIN_WIDTH)
+                };
+                let layer = |layer| {
+                    Canvas::new(MusicBox {
+                        layer,
+                        rows: &self.tracks,
+                        downtime,
+                        zoom: self.zoom,
+                        now: self.now,
+                        tz: &self.tz,
+                        selected,
+                        cache: &self.cache,
+                    })
+                    .width(width)
+                    .height(rows)
+                };
+                let canvas = stack![layer(Layer::Content), layer(Layer::Overlay)];
+
+                if size.width >= musicbox::MIN_WIDTH {
+                    scrollable(canvas).into()
+                } else {
+                    scrollable(canvas)
                         .direction(scrollable::Direction::Both {
                             vertical: scrollable::Scrollbar::default(),
                             horizontal: scrollable::Scrollbar::default(),

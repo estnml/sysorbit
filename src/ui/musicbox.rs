@@ -37,7 +37,19 @@ pub struct Row {
     pub marks: Vec<Mark>,
 }
 
+/// The music box is drawn as two stacked canvases. Text always renders above
+/// the shapes of its own layer, so a tooltip sharing the content's layer
+/// would show the labels underneath through its background.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layer {
+    /// Grid, tracks and notes; cached.
+    Content,
+    /// Hover line and tooltip; handles the mouse.
+    Overlay,
+}
+
 pub struct MusicBox<'a> {
+    pub layer: Layer,
     pub rows: &'a [Row],
     pub downtime: &'a [Downtime],
     pub zoom: Zoom,
@@ -87,9 +99,10 @@ impl MusicBox<'_> {
         let grid = self.grid(size);
 
         if let Some(index) = self.selected.filter(|&index| index < self.rows.len()) {
+            // Ends at the grid's right edge instead of spilling into the margin.
             frame.fill_rectangle(
                 Point::new(0.0, Self::row_center(index) - ROW / 2.0),
-                Size::new(size.width, ROW),
+                Size::new(grid.x + grid.width, ROW),
                 palette::SURFACE,
             );
         }
@@ -349,6 +362,9 @@ impl canvas::Program<Message> for MusicBox<'_> {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
+        if self.layer == Layer::Content {
+            return None;
+        }
         match event {
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. } | mouse::Event::CursorLeft) => {
                 Some(canvas::Action::request_redraw())
@@ -370,16 +386,19 @@ impl canvas::Program<Message> for MusicBox<'_> {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        let content = self
-            .cache
-            .draw(renderer, bounds.size(), |frame| self.draw_content(frame));
-
-        let mut overlay = Frame::new(renderer, bounds.size());
-        if let Some(position) = cursor.position_in(bounds) {
-            self.draw_hover(&mut overlay, position);
+        match self.layer {
+            Layer::Content => vec![
+                self.cache
+                    .draw(renderer, bounds.size(), |frame| self.draw_content(frame)),
+            ],
+            Layer::Overlay => {
+                let mut frame = Frame::new(renderer, bounds.size());
+                if let Some(position) = cursor.position_in(bounds) {
+                    self.draw_hover(&mut frame, position);
+                }
+                vec![frame.into_geometry()]
+            }
         }
-
-        vec![content, overlay.into_geometry()]
     }
 
     fn mouse_interaction(
@@ -389,7 +408,9 @@ impl canvas::Program<Message> for MusicBox<'_> {
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
         match cursor.position_in(bounds) {
-            Some(position) if self.row_at(position.y).is_some() => mouse::Interaction::Pointer,
+            Some(position) if self.layer == Layer::Overlay && self.row_at(position.y).is_some() => {
+                mouse::Interaction::Pointer
+            }
             _ => mouse::Interaction::default(),
         }
     }
