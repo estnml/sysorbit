@@ -1,0 +1,19 @@
+[package]
+name = "sysorbit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# Default renderers: wgpu first (high performance GPU preferred), tiny-skia
+# as the CPU fallback when no usable GPU is found.
+iced = { version = "0.14", features = ["canvas", "tokio"] }
+jiff = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "process", "sync", "time"] }
+zbus = { version = "6", default-features = false, features = ["tokio"] }
+zbus_systemd = { version = "0.26201", features = ["systemd1", "zbus-async-tokio"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
