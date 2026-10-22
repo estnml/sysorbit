@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use jiff::{SignedDuration, Timestamp};
 use serde::Deserialize;
 
-use super::{Error, run};
+use jiff::civil::DateTime;
+use jiff::tz::TimeZone;
+
+use super::{Capabilities, Error, run};
 use crate::host::{Host, Invocation};
 use crate::model::{Downtime, DowntimeKind, Interval, Outcome, Run, Scope};
 
@@ -200,18 +203,76 @@ pub async fn clock_offset(host: &dyn Host) -> Result<Option<SignedDuration>, Err
     }))
 }
 
-/// Periods in `window` where the machine was powered off or suspended.
-pub async fn downtime(host: &dyn Host, window: Interval) -> Result<Vec<Downtime>, Error> {
+/// Each boot as the span from its first to its last journal entry, oldest
+/// first. JSON output needs systemd 251; older versions get the text table,
+/// printed in UTC so its timestamps parse the same everywhere.
+async fn boots(host: &dyn Host, capabilities: Capabilities) -> Result<Vec<Interval>, Error> {
     #[derive(Deserialize)]
     struct Boot {
         first_entry: i64,
         last_entry: i64,
     }
 
-    let boots = run(
-        host,
-        Invocation::new("journalctl").args(["--list-boots", "--output=json", "--no-pager"]),
-    );
+    let list_boots = || Invocation::new("journalctl").args(["--list-boots", "--no-pager"]);
+
+    if capabilities.boots_json() {
+        let json = run(host, list_boots().arg("--output=json")).await;
+        if let Ok(boots) =
+            json.and_then(|stdout| serde_json::from_str::<Vec<Boot>>(&stdout).map_err(Error::parse))
+        {
+            let mut boots: Vec<Interval> = boots
+                .into_iter()
+                .filter_map(|boot| {
+                    Some(Interval {
+                        start: Timestamp::from_microsecond(boot.first_entry).ok()?,
+                        end: Timestamp::from_microsecond(boot.last_entry).ok()?,
+                    })
+                })
+                .collect();
+            boots.sort_by_key(|boot| boot.start);
+            return Ok(boots);
+        }
+    }
+
+    let text = run(host, list_boots().env("TZ", "UTC")).await?;
+    Ok(parse_boots_text(&text))
+}
+
+/// Parses the `--list-boots` table. Rows differ between versions (header or
+/// not, an em dash between the two entries or not), so each row is scanned
+/// for `YYYY-MM-DD HH:MM:SS UTC` timestamps and rows with two are kept.
+fn parse_boots_text(text: &str) -> Vec<Interval> {
+    let mut boots: Vec<Interval> = text
+        .lines()
+        .filter_map(|line| {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            let times: Vec<Timestamp> = tokens
+                .windows(3)
+                .filter(|window| window[2].starts_with("UTC"))
+                .filter_map(|window| {
+                    let civil: DateTime = format!("{}T{}", window[0], window[1]).parse().ok()?;
+                    Some(civil.to_zoned(TimeZone::UTC).ok()?.timestamp())
+                })
+                .collect();
+            match times.as_slice() {
+                [start, end, ..] => Some(Interval {
+                    start: *start,
+                    end: *end,
+                }),
+                _ => None,
+            }
+        })
+        .collect();
+    boots.sort_by_key(|boot| boot.start);
+    boots
+}
+
+/// Periods in `window` where the machine was powered off or suspended.
+pub async fn downtime(
+    host: &dyn Host,
+    window: Interval,
+    capabilities: Capabilities,
+) -> Result<Vec<Downtime>, Error> {
     let sleeps = run(
         host,
         journalctl(window.start).args([
@@ -219,19 +280,15 @@ pub async fn downtime(host: &dyn Host, window: Interval) -> Result<Vec<Downtime>
             format!("MESSAGE_ID={SLEEP_STOP}"),
         ]),
     );
-    let (boots, sleeps) = tokio::join!(boots, sleeps);
+    let (boots, sleeps) = tokio::join!(boots(host, capabilities), sleeps);
 
-    let boots: Vec<Boot> = serde_json::from_str(&boots?).map_err(Error::parse)?;
-    let mut downtime: Vec<Downtime> = boots
+    let mut downtime: Vec<Downtime> = boots?
         .windows(2)
-        .filter_map(|pair| {
-            Some(Interval {
-                start: Timestamp::from_microsecond(pair[0].last_entry).ok()?,
-                end: Timestamp::from_microsecond(pair[1].first_entry).ok()?,
-            })
-        })
-        .map(|interval| Downtime {
-            interval,
+        .map(|pair| Downtime {
+            interval: Interval {
+                start: pair[0].end,
+                end: pair[1].start,
+            },
             kind: DowntimeKind::PoweredOff,
         })
         .collect();
@@ -307,6 +364,27 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].outcome, Outcome::Success);
         assert_eq!(runs[0].start.as_microsecond(), 1_000_000);
+    }
+
+    #[test]
+    fn parses_boot_table_of_any_version() {
+        // systemd 262 with header row.
+        let modern = "\
+IDX  BOOT ID                          FIRST ENTRY                 LAST ENTRY
+ -1 960c19c5652542b0862c6b4dd938d12b Fri 2026-06-05 12:44:38 UTC Fri 2026-06-05 12:44:42 UTC
+  0 d39e515e7d1e4367adeb9b55f1a7e409 Thu 2026-10-22 21:21:06 UTC Thu 2026-10-22 22:40:50 UTC
+";
+        // Older versions join the two entries with an em dash.
+        let old = " -1 960c19c5652542b0862c6b4dd938d12b Fri 2026-06-05 12:44:38 UTC—Fri 2026-06-05 12:44:42 UTC\n";
+
+        let boots = parse_boots_text(modern);
+        assert_eq!(boots.len(), 2);
+        assert_eq!(boots[1].start.to_string(), "2026-10-22T21:21:06Z");
+        assert_eq!(boots[1].end.to_string(), "2026-10-22T22:40:50Z");
+
+        let boots = parse_boots_text(old);
+        assert_eq!(boots.len(), 1);
+        assert_eq!(boots[0].end.to_string(), "2026-06-05T12:44:42Z");
     }
 
     #[test]

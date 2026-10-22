@@ -20,6 +20,8 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub struct Invocation {
     pub program: String,
     pub args: Vec<String>,
+    /// Extra environment, on top of what every host sets for parsing.
+    pub env: Vec<(String, String)>,
 }
 
 impl Invocation {
@@ -27,7 +29,13 @@ impl Invocation {
         Self {
             program: program.into(),
             args: Vec::new(),
+            env: Vec::new(),
         }
+    }
+
+    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.push((key.into(), value.into()));
+        self
     }
 
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
@@ -47,6 +55,9 @@ impl Invocation {
 
 impl std::fmt::Display for Invocation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (key, value) in &self.env {
+            write!(f, "{key}={value} ")?;
+        }
         write!(f, "{}", self.program)?;
         for arg in &self.args {
             write!(f, " {arg}")?;
@@ -108,6 +119,7 @@ impl Host for LocalHost {
                 .env("LC_ALL", "C")
                 .env("SYSTEMD_PAGER", "")
                 .env("SYSTEMD_COLORS", "0")
+                .envs(invocation.env.iter().map(|(key, value)| (key, value)))
                 .kill_on_drop(true)
                 .output()
                 .await?;

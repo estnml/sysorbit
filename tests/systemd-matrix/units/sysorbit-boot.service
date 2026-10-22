@@ -1,0 +1,6 @@
+[Unit]
+Description=sysorbit matrix: monotonic job
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'sleep 2; exit 1'

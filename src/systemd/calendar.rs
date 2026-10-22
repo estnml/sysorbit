@@ -7,7 +7,7 @@ use jiff::Timestamp;
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
 
-use super::{Error, run};
+use super::{Capabilities, Error, run};
 use crate::host::{Host, Invocation};
 use crate::model::Interval;
 
@@ -16,22 +16,28 @@ const MAX_ITERATIONS: usize = 5000;
 
 /// Returns the elapse times of each expression inside `window`.
 /// Expressions systemd rejects map to an empty list.
+///
+/// Older systemd versions get less: without `--base-time` (< 244) the times
+/// start now instead of at the window start, without `--iterations` (< 242)
+/// only the next elapse is known.
 pub async fn occurrences(
     host: &dyn Host,
     expressions: &[String],
     window: Interval,
+    capabilities: Capabilities,
 ) -> HashMap<String, Vec<Timestamp>> {
     let mut result = HashMap::new();
     if expressions.is_empty() {
         return result;
     }
 
-    match analyze(host, expressions, window).await {
+    match analyze(host, expressions, window, capabilities).await {
         Ok(parsed) => result.extend(parsed),
         // One bad expression fails the whole batch; retry one by one.
         Err(_) => {
             for expression in expressions {
-                if let Ok(parsed) = analyze(host, std::slice::from_ref(expression), window).await {
+                let single = std::slice::from_ref(expression);
+                if let Ok(parsed) = analyze(host, single, window, capabilities).await {
                     result.extend(parsed);
                 }
             }
@@ -39,7 +45,7 @@ pub async fn occurrences(
     }
 
     for times in result.values_mut() {
-        times.retain(|&at| at < window.end);
+        times.retain(|&at| window.start <= at && at < window.end);
     }
 
     result
@@ -49,12 +55,16 @@ async fn analyze(
     host: &dyn Host,
     expressions: &[String],
     window: Interval,
+    capabilities: Capabilities,
 ) -> Result<HashMap<String, Vec<Timestamp>>, Error> {
-    let invocation = Invocation::new("systemd-analyze")
-        .arg("calendar")
-        .arg(format!("--iterations={MAX_ITERATIONS}"))
-        .arg(format!("--base-time=@{}", window.start.as_second()))
-        .args(expressions.iter().cloned());
+    let mut invocation = Invocation::new("systemd-analyze").arg("calendar");
+    if capabilities.calendar_iterations() {
+        invocation = invocation.arg(format!("--iterations={MAX_ITERATIONS}"));
+    }
+    if capabilities.calendar_base_time() {
+        invocation = invocation.arg(format!("--base-time=@{}", window.start.as_second()));
+    }
+    let invocation = invocation.args(expressions.iter().cloned());
 
     Ok(parse(&run(host, invocation).await?, expressions))
 }
@@ -93,8 +103,11 @@ fn parse_block(block: &str) -> Vec<Timestamp> {
         .filter_map(|line| {
             let (label, value) = line.split_once(": ")?;
             let label = label.trim();
-            let is_elapse =
-                label == "Next elapse" || label == "(in UTC)" || label.starts_with("Iteration #");
+            // systemd before 255 or so abbreviates `Iteration #2` to `Iter. #2`.
+            let is_elapse = label == "Next elapse"
+                || label == "(in UTC)"
+                || label.starts_with("Iteration #")
+                || label.starts_with("Iter. #");
             // Lines in a non-UTC zone do not parse; their `(in UTC)` twin does.
             is_elapse.then(|| parse_utc(value)).flatten()
         })
@@ -141,6 +154,20 @@ Normalized form: *-*-* 00:00:00
         assert_eq!(weekdays[0].to_string(), "2026-10-23T00:00:00Z");
         assert_eq!(weekdays[1].to_string(), "2026-10-26T00:00:00Z");
         assert_eq!(parsed["daily"].len(), 1);
+    }
+
+    #[test]
+    fn parses_abbreviated_iterations() {
+        // systemd 252 on a host in UTC.
+        let stdout = "\
+Normalized form: *-*-* *:00/15:00
+    Next elapse: Thu 2026-10-22 21:00:00 UTC
+       From now: 1h 48min ago
+       Iter. #2: Thu 2026-10-22 21:15:00 UTC
+       From now: 1h 33min ago
+";
+        let parsed = parse(stdout, &["*-*-* *:00/15:00".to_owned()]);
+        assert_eq!(parsed["*-*-* *:00/15:00"].len(), 2);
     }
 
     #[test]
