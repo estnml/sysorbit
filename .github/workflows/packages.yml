@@ -118,6 +118,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Release assets cannot start with a dot; AUR wants it back as .SRCINFO.
+          mv artifacts/sysorbit-arch-x86_64/.SRCINFO artifacts/sysorbit-arch-x86_64/SRCINFO
           gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
             --repo "$GITHUB_REPOSITORY" \
             --title "sysorbit ${GITHUB_REF_NAME#v}" --generate-notes \
@@ -126,4 +128,4 @@ jobs:
             artifacts/sysorbit-linux-x86_64/sysorbit-*-linux-x86_64.tar.gz \
             artifacts/sysorbit-arch-x86_64/*.pkg.tar.zst \
             artifacts/sysorbit-arch-x86_64/PKGBUILD \
-            artifacts/sysorbit-arch-x86_64/.SRCINFO
+            artifacts/sysorbit-arch-x86_64/SRCINFO

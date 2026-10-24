@@ -85,11 +85,13 @@ git push origin v0.1.0
 
 The workflow checks that the tag matches `Cargo.toml`, builds and tests the
 packages, and creates a draft release `v0.1.0` with the DEB, RPM, Arch package,
-`sysorbit-VERSION-linux-x86_64.tar.gz`, `PKGBUILD` and `.SRCINFO`. Review the
+`sysorbit-VERSION-linux-x86_64.tar.gz`, `PKGBUILD` and `SRCINFO` (release
+assets cannot start with a dot). Review the
 notes on GitHub and publish it. The archive in the release is the one the AUR
 checksum was made from; do not replace it.
 
-Submit the release's `PKGBUILD`, `.SRCINFO` and the repository's `LICENSE` to the
+Submit the release's `PKGBUILD`, its `SRCINFO` renamed to `.SRCINFO`, and the
+repository's `LICENSE` to the
 `sysorbit-bin` AUR repository separately. Only then will `yay -S sysorbit-bin`
 work.
 
