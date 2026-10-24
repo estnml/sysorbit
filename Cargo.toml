@@ -63,6 +63,11 @@ category = "Utility"
 [package.metadata.packager.linux]
 generate-desktop-entry = false
 
+# Apple Silicon and Intel Macs from Big Sur on. packaging/macos.sh adds the
+# signing identity when the Apple credentials are present.
+[package.metadata.packager.macos]
+minimum-system-version = "11.0"
+
 # cargo-packager 0.11 can only write Depends. APT installs Recommends by default,
 # and the RPM and AUR recipes mark SSH and the portal as optional.
 [package.metadata.packager.deb]
