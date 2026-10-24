@@ -63,6 +63,14 @@ pub fn run(hosts: Vec<HostEntry>, selected: Option<usize>, problems: Vec<String>
         App::update,
         App::view,
     )
+    .window(iced::window::Settings {
+        #[cfg(target_os = "linux")]
+        platform_specific: iced::window::settings::PlatformSpecific {
+            application_id: "io.github.estnml.sysorbit".to_owned(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
     .title(App::title)
     .subscription(App::subscription)
     .theme(App::theme)

@@ -1,0 +1,30 @@
+# Maintainer: Esat Mustafa Namlı <57932905+estnml@users.noreply.github.com>
+pkgname=sysorbit-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='Visualize systemd timers on local and remote Linux hosts'
+arch=('x86_64')
+url='https://github.com/estnml/sysorbit'
+license=('MIT')
+depends=('glibc>=2.36' 'gcc-libs' 'libxkbcommon' 'libxkbcommon-x11' 'wayland'
+         'libx11' 'libxcursor' 'libxi' 'libxrandr' 'libglvnd' 'vulkan-icd-loader'
+         'fontconfig' 'ttf-dejavu' 'systemd>=239')
+optdepends=('openssh: monitor remote hosts over SSH'
+            'xdg-desktop-portal: choose an SSH key file from a dialog')
+provides=("sysorbit=${pkgver}")
+conflicts=('sysorbit')
+# Preserve the release binary so its checksum and build ID remain useful.
+options=('!strip' '!debug')
+source=("${url}/releases/download/v${pkgver}/sysorbit-${pkgver}-linux-x86_64.tar.gz")
+sha256sums=('@SHA256@')
+
+package() {
+    cd "sysorbit-${pkgver}"
+    install -Dm755 sysorbit "${pkgdir}/usr/bin/sysorbit"
+    install -Dm644 io.github.estnml.sysorbit.desktop "${pkgdir}/usr/share/applications/io.github.estnml.sysorbit.desktop"
+    install -Dm644 sysorbit.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/sysorbit.svg"
+    install -Dm644 sysorbit.png "${pkgdir}/usr/share/icons/hicolor/256x256/apps/sysorbit.png"
+    install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/sysorbit/LICENSE"
+    install -Dm644 README.md "${pkgdir}/usr/share/doc/sysorbit/README.md"
+    install -Dm644 LOGGING.md "${pkgdir}/usr/share/doc/sysorbit/LOGGING.md"
+}

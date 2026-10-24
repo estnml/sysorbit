@@ -2,6 +2,11 @@
 name = "sysorbit"
 version = "0.1.0"
 edition = "2024"
+authors = ["Esat Mustafa Namlı"]
+description = "A cross-platform desktop application for Linux, macOS, and Windows to visualize systemd timers (239+) on local and remote Linux hosts."
+repository = "https://github.com/estnml/sysorbit"
+readme = "README.md"
+license = "MIT"
 
 [dependencies]
 directories = "6"
@@ -34,3 +39,79 @@ rustix = { version = "1", features = ["system", "time"] }
 fluent-syntax = "0.12"
 tokio = { version = "1", features = ["rt", "macros"] }
 zbus = { version = "6", default-features = false, features = ["p2p", "service", "tokio"] }
+
+# Symbols only name functions in backtraces and profiles; every release build,
+# packaged or not, leaves them out.
+[profile.release]
+strip = true
+
+[package.metadata.packager]
+product-name = "sysorbit"
+identifier = "io.github.estnml.sysorbit"
+formats = ["deb"]
+out-dir = "target/packages"
+binaries-dir = "target/release"
+icons = ["assets/sysorbit.png"]
+license-file = "LICENSE"
+authors = ["Esat Mustafa Namlı <57932905+estnml@users.noreply.github.com>"]
+homepage = "https://github.com/estnml/sysorbit"
+description = "Visualize systemd timers on local and remote Linux hosts"
+long-description = "Browse system and user timers, explore schedules and journal logs, and connect to remote Linux hosts over SSH. Includes English and Turkish interfaces and privacy-preserving local diagnostics."
+category = "Utility"
+
+[package.metadata.packager.linux]
+generate-desktop-entry = false
+
+# cargo-packager 0.11 can only write Depends. APT installs Recommends by default,
+# and the RPM and AUR recipes mark SSH and the portal as optional.
+[package.metadata.packager.deb]
+section = "admin"
+depends = [
+    "libc6 (>= 2.36)", "libgcc-s1", "libxkbcommon0", "libxkbcommon-x11-0",
+    "libwayland-client0", "libx11-6", "libxcursor1", "libxi6", "libxrandr2",
+    "libegl1", "libvulkan1", "fontconfig", "fonts-dejavu-core",
+    "systemd (>= 239)", "openssh-client", "xdg-desktop-portal",
+]
+
+[package.metadata.packager.deb.files]
+"packaging/io.github.estnml.sysorbit.desktop" = "usr/share/applications/io.github.estnml.sysorbit.desktop"
+"assets/sysorbit.svg" = "usr/share/icons/hicolor/scalable/apps/sysorbit.svg"
+"LICENSE" = "usr/share/doc/sysorbit/copyright"
+"README.md" = "usr/share/doc/sysorbit/README.md"
+"LOGGING.md" = "usr/share/doc/sysorbit/LOGGING.md"
+
+[package.metadata.generate-rpm]
+summary = "Visualize systemd timers on local and remote Linux hosts"
+release = "1"
+assets = [
+    { source = "target/release/sysorbit", dest = "/usr/bin/sysorbit", mode = "755" },
+    { source = "packaging/io.github.estnml.sysorbit.desktop", dest = "/usr/share/applications/io.github.estnml.sysorbit.desktop", mode = "644" },
+    { source = "assets/sysorbit.svg", dest = "/usr/share/icons/hicolor/scalable/apps/sysorbit.svg", mode = "644" },
+    { source = "assets/sysorbit.png", dest = "/usr/share/icons/hicolor/256x256/apps/sysorbit.png", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/sysorbit/LICENSE", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/sysorbit/README.md", mode = "644", doc = true },
+    { source = "LOGGING.md", dest = "/usr/share/doc/sysorbit/LOGGING.md", mode = "644", doc = true },
+]
+
+# Explicit ELF and dynamically loaded GUI dependencies. The build script disables
+# automatic RPM requirements because its ldd parser mishandles weak symbols.
+[package.metadata.generate-rpm.requires]
+glibc = ">= 2.36"
+libgcc = "*"
+libxkbcommon = "*"
+libxkbcommon-x11 = "*"
+libwayland-client = "*"
+libX11 = "*"
+libXcursor = "*"
+libXi = "*"
+libXrandr = "*"
+libglvnd-egl = "*"
+vulkan-loader = "*"
+fontconfig = "*"
+dejavu-sans-fonts = "*"
+systemd = ">= 239"
+
+# Needed only for remote hosts and the SSH key file dialog.
+[package.metadata.generate-rpm.recommends]
+openssh-clients = "*"
+xdg-desktop-portal = "*"

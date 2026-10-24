@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Sysorbit
+GenericName=Systemd Timer Viewer
+GenericName[tr]=Systemd Zamanlayıcı Görüntüleyicisi
+Comment=Explore systemd timer schedules and run history
+Comment[tr]=Systemd zamanlayıcılarını ve çalışma geçmişini inceleyin
+Exec=sysorbit
+TryExec=sysorbit
+Icon=sysorbit
+Terminal=false
+Categories=System;Monitor;
+Keywords=systemd;timer;schedule;journal;ssh;
+StartupNotify=true
+StartupWMClass=io.github.estnml.sysorbit

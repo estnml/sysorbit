@@ -1,0 +1,103 @@
+name: Linux packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          test "$GITHUB_REF_NAME" = "v$version"
+      - name: Build Debian baseline image
+        run: docker build -t sysorbit-packaging -f packaging/Dockerfile packaging
+      - name: Build packages
+        run: |
+          mkdir -p target/linux-packaging
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e CARGO_HOME=/tmp/cargo \
+            -v "$PWD:/work:ro" \
+            -v "$PWD/target/linux-packaging:/work/target" \
+            sysorbit-packaging
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sysorbit-linux-x86_64
+          path: target/linux-packaging/packages/
+          if-no-files-found: error
+
+  install:
+    needs: linux
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian:12-slim
+            install: >-
+              apt-get update && apt-get install -y --no-install-recommends
+              /packages/*.deb xvfb xauth dbus-x11 libglib2.0-bin xdotool
+              desktop-file-utils procps
+          - image: fedora:43
+            install: >-
+              dnf install -y /packages/*.rpm xorg-x11-server-Xvfb xorg-x11-xauth
+              dbus-daemon glib2 xdotool desktop-file-utils procps-ng
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sysorbit-linux-x86_64
+          path: packages
+      - name: Install and launch from the desktop entry
+        env:
+          TEST_IMAGE: ${{ matrix.image }}
+          INSTALL_COMMAND: ${{ matrix.install }}
+        run: |
+          docker run --rm -v "$PWD/packages:/packages:ro" \
+            -v "$PWD/packaging:/checks:ro" "$TEST_IMAGE" \
+            bash -ec "$INSTALL_COMMAND && bash /checks/smoke-test.sh"
+
+  arch:
+    needs: linux
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sysorbit-linux-x86_64
+          path: packages
+      - name: Build Arch package and AUR metadata
+        run: |
+          pacman -Syu --noconfirm
+          useradd -m builder
+          cp packages/sysorbit-*-linux-x86_64.tar.gz packages/aur/
+          chown -R builder:builder packages
+          cd packages/aur
+          su builder -c 'makepkg --printsrcinfo > .SRCINFO'
+          su builder -c 'makepkg --nodeps --noconfirm'
+      - name: Install and launch from the desktop entry
+        run: |
+          # Runtime dependencies come from the package itself, which tests them.
+          pacman -S --noconfirm xorg-server-xvfb xorg-xauth dbus glib2 xdotool \
+            desktop-file-utils procps-ng
+          pacman -U --noconfirm packages/aur/*.pkg.tar.zst
+          bash packaging/smoke-test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sysorbit-arch-x86_64
+          path: |
+            packages/aur/*.pkg.tar.zst
+            packages/aur/PKGBUILD
+            packages/aur/.SRCINFO
+            packages/aur/LICENSE
+          include-hidden-files: true
+          if-no-files-found: error
