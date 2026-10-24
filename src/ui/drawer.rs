@@ -30,6 +30,9 @@ pub struct Drawer {
     pub tab: Tab,
     /// The run whose logs to show, by start time; `None` means the latest.
     pub run: Option<Timestamp>,
+    /// The mark on the timer's track that keyboard navigation is on, by
+    /// its anchor time.
+    pub focus: Option<Timestamp>,
     pub logs: Logs,
 }
 
@@ -39,6 +42,7 @@ impl Drawer {
             timer,
             tab: Tab::default(),
             run: None,
+            focus: None,
             logs: Logs::None,
         }
     }

@@ -14,6 +14,7 @@ mod scale;
 use std::sync::Arc;
 use std::time::Duration;
 
+use iced::keyboard::{self, key::Named};
 use iced::widget::canvas::{Cache, Canvas};
 use iced::widget::pane_grid::{self, PaneGrid};
 use iced::widget::{column, container, responsive, row, scrollable, space, stack, text};
@@ -24,7 +25,7 @@ use jiff::tz::TimeZone;
 use crate::host::Host;
 use crate::model::{LogLine, Outcome, Scope, Snapshot};
 use crate::systemd;
-use crate::timeline;
+use crate::timeline::{self, Mark};
 use drawer::{Drawer, Logs, Tab};
 use musicbox::{Layer, MusicBox, Row as Track};
 use scale::Zoom;
@@ -55,13 +56,31 @@ pub enum Message {
     Select(usize),
     /// A note on a track, i.e. one run, was clicked.
     SelectRun(usize, Timestamp),
+    /// Another mark on a track, by its anchor, was clicked.
+    Focus(usize, Timestamp),
     /// A run was picked in the drawer's run list.
     OpenRun(Timestamp),
+    Navigate(Nav),
     SetTab(Tab),
     Deselect,
     LogsLoaded(String, Result<Arc<Vec<LogLine>>, String>),
     ResizeDrawer(pane_grid::ResizeEvent),
     Live(live::Event),
+}
+
+/// Keyboard moves through the selected timer's marks and the timers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nav {
+    Previous,
+    Next,
+    First,
+    Last,
+    Up,
+    Down,
+    /// Opens the logs of the focused run.
+    Open,
+    /// Leaves the focused mark, then the timer.
+    Back,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -141,6 +160,7 @@ impl App {
         Subscription::batch([
             clock::subscription(self.zoom.tick()),
             iced::time::every(refresh).map(|_| Message::Refresh),
+            keyboard::listen().filter_map(navigation),
             watch,
         ])
     }
@@ -231,18 +251,35 @@ impl App {
                 let mut drawer = Drawer::new(id);
                 drawer.tab = Tab::Logs;
                 drawer.run = Some(start);
+                drawer.focus = Some(start);
                 self.drawer = Some(drawer);
                 self.cache.clear();
                 self.ensure_logs(false)
+            }
+            Message::Focus(index, at) => {
+                let Some(id) = self.tracks.get(index).map(|track| track.timer.id.clone()) else {
+                    return Task::none();
+                };
+                if self.drawer.as_ref().is_none_or(|drawer| drawer.timer != id) {
+                    let tab = self.drawer.as_ref().map(|drawer| drawer.tab);
+                    self.drawer = Some(Drawer {
+                        tab: tab.unwrap_or_default(),
+                        ..Drawer::new(id)
+                    });
+                    self.cache.clear();
+                }
+                self.focus(at)
             }
             Message::OpenRun(start) => {
                 if let Some(drawer) = &mut self.drawer {
                     drawer.tab = Tab::Logs;
                     drawer.run = Some(start);
+                    drawer.focus = Some(start);
                 }
                 self.cache.clear();
                 self.ensure_logs(false)
             }
+            Message::Navigate(nav) => self.navigate(nav),
             Message::SetTab(tab) => {
                 if let Some(drawer) = &mut self.drawer {
                     drawer.tab = tab;
@@ -283,6 +320,109 @@ impl App {
                 }
             },
         }
+    }
+
+    /// Index of the selected timer's track.
+    fn selected(&self) -> Option<usize> {
+        let drawer = self.drawer.as_ref()?;
+        self.tracks
+            .iter()
+            .position(|track| track.timer.id == drawer.timer)
+    }
+
+    fn navigate(&mut self, nav: Nav) -> Task<Message> {
+        let Some(index) = self.selected() else {
+            return Task::none();
+        };
+        let Some(drawer) = self.drawer.as_mut() else {
+            return Task::none();
+        };
+
+        match nav {
+            Nav::Up | Nav::Down => {
+                let target = match nav {
+                    Nav::Up => index.checked_sub(1),
+                    _ => Some(index + 1).filter(|&next| next < self.tracks.len()),
+                };
+                let Some(track) = target.and_then(|target| self.tracks.get(target)) else {
+                    return Task::none();
+                };
+                *drawer = Drawer {
+                    tab: drawer.tab,
+                    ..Drawer::new(track.timer.id.clone())
+                };
+                self.cache.clear();
+                self.ensure_logs(false)
+            }
+            Nav::Back => {
+                if drawer.focus.take().is_none() {
+                    self.drawer = None;
+                    self.cache.clear();
+                }
+                Task::none()
+            }
+            Nav::Open => match drawer.focus {
+                Some(at)
+                    if self.tracks[index]
+                        .marks
+                        .iter()
+                        .any(|mark| is_run_at(mark, at)) =>
+                {
+                    self.update(Message::OpenRun(at))
+                }
+                _ => Task::none(),
+            },
+            Nav::Previous | Nav::Next | Nav::First | Nav::Last => {
+                let visible = self.zoom.visible(self.now);
+                let mut anchors: Vec<Timestamp> = self.tracks[index]
+                    .marks
+                    .iter()
+                    .filter(|mark| musicbox::focusable(mark))
+                    .map(Mark::anchor)
+                    .filter(|&at| visible.contains(at))
+                    .collect();
+                anchors.dedup();
+                let Some(last) = anchors.len().checked_sub(1) else {
+                    return Task::none();
+                };
+                // Without a focused mark, the arrows start from now.
+                let current = drawer
+                    .focus
+                    .and_then(|focus| anchors.iter().position(|&at| at == focus));
+                let target = match (nav, current) {
+                    (Nav::First, _) => 0,
+                    (Nav::Last, _) => last,
+                    (Nav::Previous, Some(current)) => current.saturating_sub(1),
+                    (_, Some(current)) => (current + 1).min(last),
+                    (Nav::Previous, None) => {
+                        anchors.iter().rposition(|&at| at <= self.now).unwrap_or(0)
+                    }
+                    (_, None) => anchors.iter().position(|&at| at > self.now).unwrap_or(last),
+                };
+                self.focus(anchors[target])
+            }
+        }
+    }
+
+    /// Focuses the mark at `at` on the selected track; a run also becomes
+    /// the drawer's run.
+    fn focus(&mut self, at: Timestamp) -> Task<Message> {
+        let is_run = self.selected().is_some_and(|index| {
+            self.tracks[index]
+                .marks
+                .iter()
+                .any(|mark| is_run_at(mark, at))
+        });
+        let Some(drawer) = self.drawer.as_mut() else {
+            return Task::none();
+        };
+        drawer.focus = Some(at);
+        if is_run && drawer.run != Some(at) {
+            drawer.run = Some(at);
+            self.cache.clear();
+            return self.ensure_logs(false);
+        }
+        Task::none()
     }
 
     /// Fetches the logs of the run shown in the logs tab when they are not
@@ -453,6 +593,7 @@ impl App {
                     tz: &self.tz,
                     selected: selected.map(|(index, _)| index),
                     selected_run: selected.and_then(|(_, run)| run),
+                    focus: self.drawer.as_ref().and_then(|drawer| drawer.focus),
                     cache: &self.cache,
                 })
                 .width(width)
@@ -542,12 +683,51 @@ impl App {
             ),
         };
 
+        let keys = if self.drawer.is_some() {
+            "←/→ marks · ↑/↓ timers · Enter logs · Esc back"
+        } else {
+            ""
+        };
+
         row![
             text(indicator).size(12).color(color),
             text(parts.join("  ·  ")).size(12).color(palette::MUTED),
+            space::horizontal(),
+            text(keys).size(12).color(palette::FAINT),
         ]
         .spacing(12)
         .padding([0.0, musicbox::PAD])
         .into()
     }
+}
+
+fn is_run_at(mark: &Mark, at: Timestamp) -> bool {
+    matches!(mark, Mark::Run { start, .. } if *start == at)
+}
+
+/// Keys for [`Nav`]; anything with Ctrl, Alt or Super is left alone.
+fn navigation(event: keyboard::Event) -> Option<Message> {
+    let keyboard::Event::KeyPressed {
+        key: keyboard::Key::Named(key),
+        modifiers,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    if modifiers.control() || modifiers.alt() || modifiers.logo() {
+        return None;
+    }
+    let nav = match key {
+        Named::ArrowLeft => Nav::Previous,
+        Named::ArrowRight => Nav::Next,
+        Named::Home => Nav::First,
+        Named::End => Nav::Last,
+        Named::ArrowUp => Nav::Up,
+        Named::ArrowDown => Nav::Down,
+        Named::Enter => Nav::Open,
+        Named::Escape => Nav::Back,
+        _ => return None,
+    };
+    Some(Message::Navigate(nav))
 }

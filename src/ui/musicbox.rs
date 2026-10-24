@@ -60,6 +60,8 @@ pub struct MusicBox<'a> {
     pub selected: Option<usize>,
     /// Start of the run whose logs are open; ringed on the selected track.
     pub selected_run: Option<Timestamp>,
+    /// Anchor of the keyboard focused mark on the selected track.
+    pub focus: Option<Timestamp>,
     pub cache: &'a Cache,
 }
 
@@ -307,12 +309,13 @@ impl MusicBox<'_> {
         });
     }
 
-    fn draw_hover(&self, frame: &mut Frame, cursor: Point) {
+    /// Draws the hover line and tooltip; true when a tooltip was drawn.
+    fn draw_hover(&self, frame: &mut Frame, cursor: Point) -> bool {
         let size = frame.size();
         let axis = self.axis(size.width);
         let grid = self.grid(size);
         let Some(index) = self.row_at(cursor.y) else {
-            return;
+            return false;
         };
         let row = &self.rows[index];
 
@@ -323,10 +326,10 @@ impl MusicBox<'_> {
             }
             lines.push((row.subtitle.clone(), palette::MUTED));
             tooltip(frame, cursor, &lines);
-            return;
+            return true;
         }
         if cursor.x > grid.x + grid.width {
-            return;
+            return false;
         }
 
         frame.stroke(
@@ -356,10 +359,80 @@ impl MusicBox<'_> {
                     .find(|down| down.interval.contains(at))
                     .map(|down| describe_downtime(down, self.tz))
             });
-        if let Some(lines) = lines {
-            tooltip(frame, cursor, &lines);
+        match lines {
+            Some(lines) => {
+                tooltip(frame, cursor, &lines);
+                true
+            }
+            None => false,
         }
     }
+
+    /// Rings the focused mark and, unless the mouse shows another tooltip,
+    /// pins the mark's tooltip next to it.
+    fn draw_focus(&self, frame: &mut Frame, with_tooltip: bool) {
+        let (Some(index), Some(at)) = (self.selected, self.focus) else {
+            return;
+        };
+        let Some(mark) = self.rows.get(index).and_then(|row| {
+            row.marks
+                .iter()
+                .find(|mark| focusable(mark) && mark.anchor() == at)
+        }) else {
+            return;
+        };
+        let axis = self.axis(frame.width());
+        if !axis.window.contains(at) {
+            return;
+        }
+
+        let point = mark_point(mark, &axis, Self::row_center(index));
+        frame.stroke(
+            &Path::circle(point, 12.0),
+            Stroke::default().with_color(palette::TEXT).with_width(1.5),
+        );
+        if with_tooltip {
+            tooltip(frame, point, &describe(mark, self.now, self.tz));
+        }
+    }
+}
+
+/// Marks keyboard focus can land on; a tether only links two others.
+pub fn focusable(mark: &Mark) -> bool {
+    !matches!(mark, Mark::Tether { .. })
+}
+
+/// Where a mark is drawn on its track.
+fn mark_point(mark: &Mark, axis: &TimeAxis, center: f32) -> Point {
+    match mark {
+        Mark::CatchUp { from, to } => {
+            Point::new((axis.x(*from) + axis.x(*to)) / 2.0, center - 18.0)
+        }
+        Mark::Planned { at, scheduled, .. } => Point::new(axis.x(scheduled.unwrap_or(*at)), center),
+        Mark::Run { start, .. } => Point::new(axis.x(*start), center),
+        other => Point::new(axis.x(other.anchor()), center),
+    }
+}
+
+/// The mark under the cursor, or else the nearest one beside it on the
+/// track, so small marks are easy to click.
+fn pick<'a>(
+    marks: &'a [Mark],
+    axis: &TimeAxis,
+    center: f32,
+    cursor: Point,
+    now: Timestamp,
+) -> Option<&'a Mark> {
+    const REACH: f32 = 14.0;
+    hit(marks, axis, center, cursor, now).or_else(|| {
+        marks
+            .iter()
+            .filter(|mark| focusable(mark))
+            .map(|mark| (mark, (mark_point(mark, axis, center).x - cursor.x).abs()))
+            .filter(|(_, distance)| *distance <= REACH)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(mark, _)| mark)
+    })
 }
 
 impl canvas::Program<Message> for MusicBox<'_> {
@@ -384,13 +457,15 @@ impl canvas::Program<Message> for MusicBox<'_> {
                 let index = self.row_at(position.y)?;
                 let axis = self.axis(bounds.width);
                 let center = Self::row_center(index);
-                // A note opens the logs of its run, anything else the timer.
-                let message = match hit(&self.rows[index].marks, &axis, center, position, self.now)
-                {
-                    Some(Mark::Run { start, .. }) if position.x >= axis.left => {
-                        Message::SelectRun(index, *start)
-                    }
-                    _ => Message::Select(index),
+                // A note opens the logs of its run, another mark gets the
+                // focus, anything else selects the timer.
+                let picked = (position.x >= axis.left)
+                    .then(|| pick(&self.rows[index].marks, &axis, center, position, self.now))
+                    .flatten();
+                let message = match picked {
+                    Some(Mark::Run { start, .. }) => Message::SelectRun(index, *start),
+                    Some(mark) => Message::Focus(index, mark.anchor()),
+                    None => Message::Select(index),
                 };
                 Some(canvas::Action::publish(message).and_capture())
             }
@@ -413,9 +488,10 @@ impl canvas::Program<Message> for MusicBox<'_> {
             ],
             Layer::Overlay => {
                 let mut frame = Frame::new(renderer, bounds.size());
-                if let Some(position) = cursor.position_in(bounds) {
-                    self.draw_hover(&mut frame, position);
-                }
+                let hovering = cursor
+                    .position_in(bounds)
+                    .is_some_and(|position| self.draw_hover(&mut frame, position));
+                self.draw_focus(&mut frame, !hovering);
                 vec![frame.into_geometry()]
             }
         }
