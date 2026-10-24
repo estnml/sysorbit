@@ -1,5 +1,6 @@
 //! The iced application: state, messages and layout.
 
+mod clock;
 mod drawer;
 mod label;
 mod live;
@@ -137,7 +138,7 @@ impl App {
             .unwrap_or_else(Subscription::none);
 
         Subscription::batch([
-            iced::time::every(self.zoom.tick()).map(|_| Message::Tick),
+            clock::subscription(self.zoom.tick()),
             iced::time::every(refresh).map(|_| Message::Refresh),
             watch,
         ])

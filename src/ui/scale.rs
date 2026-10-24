@@ -62,10 +62,15 @@ impl Zoom {
         }
     }
 
-    /// How often the comb needs to move: about once per pixel.
+    /// How often the comb needs to move: about once per pixel, rounded down
+    /// to a divisor of a minute so the ticks also land on every minute.
     pub fn tick(self) -> Duration {
         let per_pixel = self.span().as_secs() / 2000;
-        Duration::from_secs(per_pixel.clamp(1, 60) as u64)
+        let secs = [60, 30, 20, 15, 12, 10, 6, 5, 4, 3, 2]
+            .into_iter()
+            .find(|&secs| secs <= per_pixel)
+            .unwrap_or(1);
+        Duration::from_secs(secs as u64)
     }
 }
 
