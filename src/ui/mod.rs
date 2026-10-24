@@ -162,6 +162,11 @@ impl App {
             clock::subscription(self.zoom.tick()),
             iced::time::every(refresh).map(|_| Message::Refresh),
             keyboard::listen().filter_map(navigation),
+            // Coming back to the window, e.g. after a suspend, shows the time.
+            iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Window(iced::window::Event::Focused) => Some(Message::Tick),
+                _ => None,
+            }),
             watch,
         ])
     }

@@ -1,0 +1,39 @@
+# Builds and tests on the three systems the app runs on, and keeps the
+# release binaries of each push as artifacts.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            binary: sysorbit
+          - os: macos-latest
+            binary: sysorbit
+          - os: windows-latest
+            binary: sysorbit.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+      - name: Release build
+        run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sysorbit-${{ matrix.os }}
+          path: target/release/${{ matrix.binary }}

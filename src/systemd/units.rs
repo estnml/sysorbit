@@ -5,10 +5,10 @@
 
 use std::collections::BTreeSet;
 
+use super::dbus::{ManagerProxy, TimerProxy, UnitProxy};
 use futures_util::future::join_all;
 use jiff::{SignedDuration, Timestamp};
 use zbus::Connection;
-use zbus_systemd::systemd1::{ManagerProxy, TimerProxy, UnitProxy};
 
 use super::Error;
 use crate::model::{CalendarTrigger, MonotonicBase, MonotonicTrigger, Timer, Warning};

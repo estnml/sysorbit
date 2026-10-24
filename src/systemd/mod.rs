@@ -2,6 +2,7 @@
 
 mod calendar;
 mod capabilities;
+mod dbus;
 mod journal;
 mod units;
 pub mod watch;

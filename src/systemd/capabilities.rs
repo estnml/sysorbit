@@ -7,8 +7,8 @@
 
 use zbus::Connection;
 
+use super::dbus::ManagerProxy;
 use crate::model::Warning;
-use zbus_systemd::systemd1::ManagerProxy;
 
 /// Oldest systemd the app is built for (RHEL 8).
 pub const MINIMUM_VERSION: u32 = 239;

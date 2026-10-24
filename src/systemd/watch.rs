@@ -8,8 +8,8 @@ use std::num::NonZeroUsize;
 use futures_util::{Stream, StreamExt, stream};
 use zbus::message::Type;
 
+use super::dbus::ManagerProxy;
 use zbus::{Connection, MatchRule, MessageStream, OwnedObjectPath};
-use zbus_systemd::systemd1::ManagerProxy;
 
 use super::Error;
 
