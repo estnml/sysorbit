@@ -54,7 +54,7 @@ body:
     attributes:
       label: Host being shown
       options:
-        - This computer
+        - The local machine
         - A Linux host over SSH
     validations:
       required: true

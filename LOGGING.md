@@ -1,6 +1,6 @@
 # Local diagnostics
 
-Sysorbit writes diagnostic files only on the local computer running the app,
+Sysorbit writes diagnostic files only on the local machine running the app,
 including when monitoring remote hosts over SSH. Logging adds no network
 requests, telemetry, crash reporting or uploads. For a bug report, attach the
 log files from the directory below; each run records the app version, OS version,

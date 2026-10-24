@@ -71,7 +71,7 @@ warning-history = History unavailable: { $error }
 warning-journal-restricted = History unavailable: the journal shows only this user's entries. Add the user to the systemd-journal group.
 warning-downtime = Downtime unavailable: { $error }
 warning-clock = Server clock unavailable: { $error }
-# The remote host's clock compared with this machine's.
+# The remote host's clock compared with the local machine's.
 host-clock-synced = server clock in sync
 host-clock = server clock { $direction ->
     [ahead] { $span } ahead

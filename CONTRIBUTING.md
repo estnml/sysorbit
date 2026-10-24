@@ -10,7 +10,7 @@ Everyone taking part is expected to follow the
 
 Open an [issue](https://github.com/estnml/sysorbit/issues/new/choose) and
 pick a template. For a bug, the sysorbit version, your operating system,
-whether the host is this machine or reached over SSH, and its systemd
+whether the host is the local machine or reached over SSH, and its systemd
 version help most. The app's log files are safe to attach: they hold
 codes, counts and pseudonyms, never host or unit names. See
 [LOGGING.md](LOGGING.md) for where they are.
@@ -27,7 +27,7 @@ to add or improve a language.
 With a stable Rust toolchain:
 
 ```sh
-cargo run                 # this machine's timers, on Linux
+cargo run                 # the local machine's timers, on Linux
 cargo run -- user@host    # a Linux host over SSH
 ```
 
