@@ -3,15 +3,16 @@
 
 use std::sync::Arc;
 
-use iced::widget::{Column, Row, button, column, container, row, scrollable, space, text};
+use iced::widget::{Column, button, column, container, row, scrollable, space, text};
 use iced::{Border, Element, Font, Length};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
 use super::label;
+use super::overview;
 use super::palette;
 use super::{Message, segmented};
-use crate::model::{LogLine, MonotonicBase, Outcome, Run, Timer};
+use crate::model::{LogLine, Outcome, Run, Timer};
 use crate::systemd::timespan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -95,9 +96,7 @@ pub fn view<'a>(
     );
     let title = row![
         text(timer.name()).size(18),
-        text(format!("{} → {}", timer.id, timer.service))
-            .size(12)
-            .color(palette::MUTED),
+        overview::identity(timer),
         space::horizontal(),
         tabs,
         button(text("✕").size(14))
@@ -108,12 +107,17 @@ pub fn view<'a>(
     .align_y(iced::Alignment::Center);
 
     let body = match drawer.tab {
-        Tab::Overview => overview(timer, now, tz),
+        Tab::Overview => overview::view(timer, drawer.run, now, tz),
         Tab::Runs => runs(drawer, timer, tz),
         Tab::Logs => logs(drawer, timer, tz),
     };
 
-    container(column![title, body].spacing(14))
+    let mut content = Column::new().spacing(14).push(title);
+    if !timer.description.is_empty() {
+        content = content.push(text(&timer.description).size(13).color(palette::MUTED));
+    }
+
+    container(content.push(body))
         .width(Length::Fill)
         .height(Length::Fill)
         .padding(16)
@@ -127,68 +131,6 @@ pub fn view<'a>(
             ..container::Style::default()
         })
         .into()
-}
-
-fn overview<'a>(timer: &'a Timer, now: Timestamp, tz: &TimeZone) -> Element<'a, Message> {
-    let state = if timer.active { "active" } else { "inactive" };
-    let triggers: Vec<String> = timer
-        .calendar
-        .iter()
-        .map(|trigger| format!("OnCalendar={}", trigger.expression))
-        .chain(timer.monotonic.iter().map(|trigger| {
-            let key = match trigger.base {
-                MonotonicBase::TimerActivated => "OnActiveSec",
-                MonotonicBase::Boot => "OnBootSec",
-                MonotonicBase::Startup => "OnStartupSec",
-                MonotonicBase::UnitActivated => "OnUnitActiveSec",
-                MonotonicBase::UnitDeactivated => "OnUnitInactiveSec",
-            };
-            format!("{key}={}", timespan::format(trigger.offset))
-        }))
-        .collect();
-    let when = |at: Option<Timestamp>| match at {
-        Some(at) => format!("{} ({})", label::moment(at, tz), label::relative(at, now)),
-        None => "—".to_owned(),
-    };
-
-    let mut sections = vec![
-        section(
-            "State",
-            vec![format!("{state} · {}", timer.unit_file_state)],
-        ),
-        section("Triggers", triggers),
-        section(
-            "Timing",
-            vec![
-                format!("next: {}", when(timer.next_elapse)),
-                format!("last: {}", when(timer.last_trigger)),
-            ],
-        ),
-        section(
-            "Settings",
-            vec![
-                format!("Persistent={}", yes_no(timer.persistent)),
-                format!("WakeSystem={}", yes_no(timer.wake_system)),
-                format!("AccuracySec={}", timespan::format(timer.accuracy)),
-                format!(
-                    "RandomizedDelaySec={}",
-                    timespan::format(timer.randomized_delay)
-                ),
-            ],
-        ),
-    ];
-    if !timer.description.is_empty() {
-        sections.insert(0, section("Description", vec![timer.description.clone()]));
-    }
-
-    scrollable(
-        Row::from_iter(sections)
-            .spacing(40)
-            .wrap()
-            .vertical_spacing(16),
-    )
-    .height(Length::Fill)
-    .into()
 }
 
 fn runs<'a>(drawer: &'a Drawer, timer: &'a Timer, tz: &TimeZone) -> Element<'a, Message> {
@@ -332,26 +274,4 @@ fn duration(run: &Run) -> String {
 
 fn muted(message: &str) -> Element<'_, Message> {
     text(message).size(13).color(palette::MUTED).into()
-}
-
-fn heading(title: &str) -> Element<'_, Message> {
-    text(title.to_uppercase())
-        .size(11)
-        .color(palette::MUTED)
-        .into()
-}
-
-fn section(title: &str, lines: Vec<String>) -> Element<'_, Message> {
-    let mut content = Column::new()
-        .spacing(3)
-        .width(Length::Fixed(260.0))
-        .push(heading(title));
-    for line in lines {
-        content = content.push(text(line).size(13));
-    }
-    content.into()
-}
-
-fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
 }

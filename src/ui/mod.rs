@@ -2,9 +2,11 @@
 
 mod clock;
 mod drawer;
+mod explain;
 mod label;
 mod live;
 mod musicbox;
+mod overview;
 mod palette;
 mod scale;
 

@@ -17,7 +17,9 @@ use crate::model::{Downtime, DowntimeKind, Interval, Outcome, Timer};
 use crate::systemd::timespan;
 use crate::timeline::Mark;
 
-const PAD: f32 = 24.0;
+/// Margin left of the labels and right of the grid; the header and the
+/// drawer use it too, so everything lines up with the box.
+pub const PAD: f32 = 24.0;
 /// Label column width bounds; it takes a share of the width in between.
 const LABEL_MIN: f32 = 150.0;
 const LABEL_MAX: f32 = 250.0;
@@ -66,9 +68,14 @@ pub fn height(rows: usize) -> f32 {
     HEADER + ROW * rows.max(1) as f32 + FOOTER + LEGEND
 }
 
+/// Where the grid starts in a box `width` wide, i.e. the label column's width.
+pub fn grid_left(width: f32) -> f32 {
+    (width * 0.26).clamp(LABEL_MIN, LABEL_MAX)
+}
+
 impl MusicBox<'_> {
     fn axis(&self, width: f32) -> TimeAxis {
-        let left = (width * 0.26).clamp(LABEL_MIN, LABEL_MAX);
+        let left = grid_left(width);
         TimeAxis {
             window: self.zoom.visible(self.now),
             left,
