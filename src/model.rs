@@ -38,6 +38,8 @@ pub struct Snapshot {
     /// The host's clock, for hosts other than this machine.
     pub clock: Option<HostClock>,
     pub warnings: Vec<Warning>,
+    /// What the host's systemd can do; previews of new timers need it.
+    pub capabilities: crate::systemd::Capabilities,
 }
 
 /// How a remote host's clock relates to this machine's.

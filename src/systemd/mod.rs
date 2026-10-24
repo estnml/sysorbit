@@ -1,8 +1,9 @@
 //! Reads timers, their schedules and history from a [`Host`].
 
-mod calendar;
+pub mod calendar;
 mod capabilities;
 mod clock;
+mod create;
 mod dbus;
 mod journal;
 mod units;
@@ -15,6 +16,7 @@ use std::fmt;
 use jiff::Timestamp;
 
 pub use capabilities::Capabilities;
+pub use create::{NewTimer, Problem, create};
 
 use crate::diagnostics::{self, ErrorCode, Phase, Redacted};
 use crate::host::{Host, Invocation};
@@ -35,6 +37,12 @@ pub enum Error {
     /// The journal shows only the user's own entries: the user is in
     /// neither `systemd-journal` nor `adm`.
     JournalRestricted,
+    /// A unit file by this name exists, e.g. `backup.timer`.
+    UnitExists(String),
+    /// `sudo` on the host wants a password, which nobody can type over SSH.
+    PasswordRequired,
+    /// Writing or enabling new units failed; what the script said.
+    Install(String),
 }
 
 impl From<zbus::Error> for Error {
@@ -45,7 +53,7 @@ impl From<zbus::Error> for Error {
 }
 
 impl Error {
-    fn parse(parser: diagnostics::Parser, error: impl fmt::Display) -> Self {
+    pub(crate) fn parse(parser: diagnostics::Parser, error: impl fmt::Display) -> Self {
         diagnostics::parse_error(parser);
         Self::Parse(error.to_string())
     }
@@ -59,6 +67,9 @@ impl fmt::Display for Error {
             Self::Parse(reason) => write!(f, "unreadable output: {reason}"),
             Self::Bus(reason) => write!(f, "D-Bus error: {reason}"),
             Self::JournalRestricted => write!(f, "the journal shows only this user's entries"),
+            Self::UnitExists(name) => write!(f, "{name} already exists"),
+            Self::PasswordRequired => write!(f, "sudo requires a password"),
+            Self::Install(reason) => write!(f, "installing the timer failed: {reason}"),
         }
     }
 }
@@ -264,6 +275,7 @@ async fn snapshot_inner(
         history_known,
         clock,
         warnings,
+        capabilities,
     })
 }
 

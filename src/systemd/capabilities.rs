@@ -13,7 +13,7 @@ use crate::model::Warning;
 /// Oldest systemd the app is built for (RHEL 8).
 pub const MINIMUM_VERSION: u32 = 239;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Capabilities {
     /// Major version, `None` when systemd reported something unparsable.
     pub version: Option<u32>,

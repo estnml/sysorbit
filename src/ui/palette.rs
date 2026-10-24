@@ -18,6 +18,8 @@ pub const FAILED: Color = rgb(0xe0, 0x55, 0x55);
 /// `Persistent=true` catching up.
 pub const CATCH_UP: Color = rgb(0x4f, 0xb3, 0xa9);
 pub const DOWNTIME: Color = rgb(0x5a, 0x58, 0x55);
+/// A timer being composed: systemd's green, as in the icon.
+pub const DRAFT: Color = rgb(0x30, 0xd4, 0x75);
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::from_rgb8(r, g, b)

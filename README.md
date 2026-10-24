@@ -10,6 +10,7 @@ Built with Rust and [iced](https://iced.rs).
 
 - Browse system and user timers with live updates.
 - Explore schedules, run history and journal logs.
+- Create a timer and its service, previewing the unit files before they are installed.
 - Connect to Linux hosts over SSH and switch between saved hosts.
 - View the interface in English or Turkish.
 - Keep privacy-preserving local logs for bug reports.

@@ -90,6 +90,7 @@ pub enum Phase {
     Rebuild,
     CanvasRebuild,
     LogLoading,
+    CreateTimer,
 }
 
 /// Explicitly instrument futures: holding an entered span across await would
@@ -127,6 +128,7 @@ pub enum Event {
     BootsTextFallback,
     ServiceInactiveFallback,
     ClockDateFallback,
+    TimerCreated,
 }
 
 pub fn event(event: Event) {
@@ -167,6 +169,7 @@ pub fn unit_error(unit: Redacted, code: ErrorCode) {
 
 #[derive(Debug, Clone, Copy)]
 pub enum Parser {
+    Calendar,
     Journal,
     JournalLogs,
     Clock,

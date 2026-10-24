@@ -58,6 +58,11 @@ async fn analyze(
     window: Interval,
     capabilities: Capabilities,
 ) -> Result<HashMap<String, Vec<Timestamp>>, Error> {
+    let invocation = invocation(window, capabilities).args(expressions.iter().cloned());
+    Ok(parse(&run(host, invocation).await?, expressions))
+}
+
+fn invocation(window: Interval, capabilities: Capabilities) -> Invocation {
     let mut invocation = Invocation::new("systemd-analyze").arg("calendar");
     if capabilities.calendar_iterations() {
         invocation = invocation.arg(format!("--iterations={MAX_ITERATIONS}"));
@@ -65,9 +70,57 @@ async fn analyze(
     if capabilities.calendar_base_time() {
         invocation = invocation.arg(format!("--base-time=@{}", window.start.as_second()));
     }
-    let invocation = invocation.args(expressions.iter().cloned());
+    invocation
+}
 
-    Ok(parse(&run(host, invocation).await?, expressions))
+/// What systemd makes of an expression someone is typing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preview {
+    /// The form systemd reports over D-Bus once the timer exists.
+    pub normalized: String,
+    /// Elapse times inside the window.
+    pub occurrences: Vec<Timestamp>,
+}
+
+/// Expands the expressions, in order; any one systemd rejects fails the
+/// lot with systemd's reason.
+pub async fn preview(
+    host: &dyn Host,
+    expressions: &[String],
+    window: Interval,
+    capabilities: Capabilities,
+) -> Result<Vec<Preview>, Error> {
+    let invocation = invocation(window, capabilities).args(expressions.iter().cloned());
+    let stdout = run(host, invocation).await?;
+    let previews: Vec<Preview> = stdout
+        .split("\n\n")
+        .filter(|block| !block.trim().is_empty())
+        .filter_map(parse_preview)
+        .map(|mut preview| {
+            preview
+                .occurrences
+                .retain(|&at| window.start <= at && at < window.end);
+            preview
+        })
+        .collect();
+    if previews.len() != expressions.len() {
+        return Err(Error::parse(
+            crate::diagnostics::Parser::Calendar,
+            "systemd-analyze calendar left out an expression",
+        ));
+    }
+    Ok(previews)
+}
+
+fn parse_preview(stdout: &str) -> Option<Preview> {
+    let normalized = stdout.lines().find_map(|line| {
+        let (label, value) = line.split_once(": ")?;
+        (label.trim() == "Normalized form").then(|| value.trim().to_owned())
+    })?;
+    Some(Preview {
+        normalized,
+        occurrences: parse_block(stdout),
+    })
 }
 
 /// Parses blocks like the one below, one per expression in input order.
@@ -169,6 +222,24 @@ Normalized form: *-*-* *:00/15:00
 ";
         let parsed = parse(stdout, &["*-*-* *:00/15:00".to_owned()]);
         assert_eq!(parsed["*-*-* *:00/15:00"].len(), 2);
+    }
+
+    #[test]
+    fn previews_give_the_normalized_form_and_elapses() {
+        let stdout = "\
+  Original form: Mon..Fri 03:00
+Normalized form: Mon..Fri *-*-* 03:00:00
+    Next elapse: Mon 2026-10-26 03:00:00 +03
+       (in UTC): Mon 2026-10-26 00:00:00 UTC
+       From now: 2 days left
+   Iteration #2: Tue 2026-10-27 03:00:00 +03
+       (in UTC): Tue 2026-10-27 00:00:00 UTC
+       From now: 3 days left
+";
+        let preview = parse_preview(stdout).unwrap();
+        assert_eq!(preview.normalized, "Mon..Fri *-*-* 03:00:00");
+        assert_eq!(preview.occurrences.len(), 2);
+        assert_eq!(parse_preview(""), None);
     }
 
     #[test]

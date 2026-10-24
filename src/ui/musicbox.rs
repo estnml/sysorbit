@@ -37,6 +37,8 @@ pub struct Row {
     pub title: String,
     pub subtitle: String,
     pub marks: Vec<Mark>,
+    /// The timer being composed, not yet on the host.
+    pub draft: bool,
 }
 
 /// The music box is drawn as two stacked canvases. Text always renders above
@@ -65,12 +67,16 @@ pub struct MusicBox<'a> {
     /// Tracks lighting up because a run just started or failed, by index,
     /// with the color at its current strength.
     pub flashes: Vec<(usize, Color)>,
+    /// Whether the legend is drawn below the grid; left out while a timer
+    /// is composed, to give the form room.
+    pub legend: bool,
     pub cache: &'a Cache,
 }
 
-/// Canvas height needed for `rows` tracks.
-pub fn height(rows: usize) -> f32 {
-    HEADER + ROW * rows.max(1) as f32 + FOOTER + LEGEND
+/// Canvas height needed for `rows` tracks, with or without the legend.
+pub fn height(rows: usize, legend: bool) -> f32 {
+    let legend = if legend { LEGEND } else { 0.0 };
+    HEADER + ROW * rows.max(1) as f32 + FOOTER + legend
 }
 
 /// Where the grid starts in a box `width` wide, i.e. the label column's width.
@@ -136,7 +142,9 @@ impl MusicBox<'_> {
         );
 
         self.draw_comb(frame, &axis, grid);
-        draw_legend(frame, grid.y + grid.height + FOOTER);
+        if self.legend {
+            draw_legend(frame, grid.y + grid.height + FOOTER);
+        }
     }
 
     fn draw_downtime(&self, frame: &mut Frame, axis: &TimeAxis, grid: Rectangle) {
@@ -233,6 +241,19 @@ impl MusicBox<'_> {
         let center = Self::row_center(index);
         let active = row.timer.active;
 
+        if row.draft {
+            frame.fill_rectangle(
+                Point::new(0.0, center - ROW / 2.0),
+                Size::new(grid.x + grid.width, ROW),
+                palette::DRAFT.scale_alpha(0.07),
+            );
+            frame.fill_rectangle(
+                Point::new(PAD - 12.0, center - ROW / 2.0 + 8.0),
+                Size::new(3.0, ROW - 16.0),
+                palette::DRAFT,
+            );
+        }
+
         let line = Path::line(
             Point::new(grid.x, center),
             Point::new(grid.x + grid.width, center),
@@ -253,7 +274,9 @@ impl MusicBox<'_> {
             );
         }
 
-        let (title, subtitle) = if active {
+        let (title, subtitle) = if row.draft {
+            (palette::DRAFT, palette::MUTED)
+        } else if active {
             (palette::TEXT, palette::MUTED)
         } else {
             (palette::MUTED, palette::FAINT)
@@ -471,6 +494,10 @@ impl canvas::Program<Message> for MusicBox<'_> {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let position = cursor.position_in(bounds)?;
                 let index = self.row_at(position.y)?;
+                // The draft has nothing to open yet.
+                if self.rows[index].draft {
+                    return None;
+                }
                 let axis = self.axis(bounds.width);
                 let center = Self::row_center(index);
                 // A note opens the logs of its run, another mark gets the

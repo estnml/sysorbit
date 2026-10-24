@@ -1,6 +1,7 @@
 //! The iced application: state, messages and layout.
 
 mod clock;
+mod composer;
 mod controls;
 mod drawer;
 mod explain;
@@ -10,6 +11,7 @@ mod live;
 mod musicbox;
 mod overview;
 mod palette;
+mod rhythm;
 mod scale;
 
 use std::collections::HashMap;
@@ -35,6 +37,7 @@ use crate::model::{LogLine, Outcome, Scope, Snapshot};
 use crate::ssh::SshHost;
 use crate::systemd;
 use crate::timeline::{self, Mark};
+use composer::{Composer, ComposerMessage, Schedule};
 use drawer::{Drawer, Logs, Tab};
 use host_form::{Field, FormMessage, HostForm, Test};
 use musicbox::{Layer, MusicBox, Row as Track};
@@ -42,6 +45,21 @@ use scale::Zoom;
 
 /// How long a track lights up after its service started or failed.
 const FLASH: Duration = Duration::from_millis(2500);
+
+/// Most the music box takes while a timer is composed below it: the
+/// header and three tracks.
+const MUSIC_BOX_WHILE_COMPOSING: f32 = 250.0;
+/// The window's size when the app starts.
+const WINDOW: (f32, f32) = (1280.0, 760.0);
+/// Height below the body: the status line, the spacing above it and the
+/// window's padding.
+const BELOW_BODY: f32 = 68.0;
+
+/// Where the body below the header starts, measured from the window's top.
+const BODY_TOP: f32 = HEADER_BOTTOM + 12.0;
+
+/// Typing pause before the composed schedule is sent to systemd.
+const SCHEDULE_PAUSE: Duration = Duration::from_millis(300);
 
 /// How long a connection test may take before it counts as failed.
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -74,7 +92,7 @@ pub fn run(hosts: Vec<HostEntry>, selected: Option<usize>, problems: Vec<String>
     .title(App::title)
     .subscription(App::subscription)
     .theme(App::theme)
-    .window_size((1280.0, 760.0))
+    .window_size(WINDOW)
     .antialiasing(true)
     .run()
 }
@@ -93,6 +111,9 @@ pub enum Message {
     /// Opens the host dialog for `hosts[index]`, or for a new host.
     OpenForm(Option<usize>),
     Form(FormMessage),
+    /// Opens the composer for a new timer on the shown host.
+    OpenComposer,
+    Composer(ComposerMessage),
     SetZoom(Zoom),
     SetScope(Scope),
     /// A track was clicked.
@@ -108,6 +129,8 @@ pub enum Message {
     Deselect,
     LogsLoaded(String, Result<Arc<Vec<LogLine>>, String>),
     ResizeDrawer(pane_grid::ResizeEvent),
+    /// The window's new height.
+    WindowHeight(f32),
     Live(live::Event),
 }
 
@@ -144,6 +167,13 @@ struct App {
     host_problems: Vec<String>,
     /// The host dialog, while open.
     form: Option<HostForm>,
+    /// A new timer being composed in the drawer, drafted in the music box.
+    composer: Option<Composer>,
+    /// The window's height, to fit the music box above the composer.
+    window_height: f32,
+    /// How many tracks the split was fitted to while composing; `None`
+    /// once the split was dragged, which then stays as it is.
+    fitted: Option<usize>,
     /// Timers whose service just started or failed, by id: when, and in
     /// which color their track lights up.
     flashes: HashMap<String, (Instant, iced::Color)>,
@@ -184,6 +214,9 @@ impl App {
             host_menu: false,
             host_problems,
             form: None,
+            composer: None,
+            window_height: WINDOW.1,
+            fitted: None,
             flashes: HashMap::new(),
             scope: Scope::default(),
             zoom: Zoom::default(),
@@ -253,6 +286,7 @@ impl App {
                 _ => None,
             }),
             watch,
+            iced::window::resize_events().map(|(_, size)| Message::WindowHeight(size.height)),
         ])
     }
 
@@ -301,6 +335,7 @@ impl App {
             diagnostics::host_event(Event::HostSwitch, Redacted::host(host.name()));
         }
         self.selected = Some(index);
+        self.composer = None;
         self.generation += 1;
         self.snapshot = None;
         self.tracks.clear();
@@ -373,7 +408,11 @@ impl App {
                 diagnostics::zoom_change(zoom.span().as_secs());
                 self.zoom = zoom;
                 self.rebuild();
-                self.load()
+                let draft = match self.composer.as_ref().map(|composer| &composer.schedule) {
+                    Some(Schedule::Ready(_) | Schedule::Checking) => self.preview_schedule(),
+                    _ => Task::none(),
+                };
+                Task::batch([self.load(), draft])
             }
             Message::SetScope(scope) => {
                 diagnostics::scope_change(scope);
@@ -383,6 +422,11 @@ impl App {
                 self.snapshot = None;
                 self.rebuild();
                 self.load()
+            }
+            Message::Select(_) | Message::SelectRun(..) | Message::Focus(..)
+                if self.composer.is_some() =>
+            {
+                Task::none()
             }
             Message::Select(index) => {
                 let Some(id) = self.tracks.get(index).map(|track| track.timer.id.clone()) else {
@@ -441,12 +485,15 @@ impl App {
                 self.form = None;
                 Task::none()
             }
+            Message::Navigate(Nav::Back) if self.composer.is_some() => {
+                self.update_composer(ComposerMessage::Cancel)
+            }
             Message::Navigate(Nav::Back) if self.host_menu => {
                 self.host_menu = false;
                 Task::none()
             }
             // Keys go to the dialog's fields, not to the music box behind it.
-            Message::Navigate(_) if self.form.is_some() => Task::none(),
+            Message::Navigate(_) if self.form.is_some() || self.composer.is_some() => Task::none(),
             Message::Navigate(nav) => self.navigate(nav),
             Message::Frame => {
                 self.flashes
@@ -468,6 +515,21 @@ impl App {
                 Task::none()
             }
             Message::Form(message) => self.update_form(message),
+            Message::OpenComposer => {
+                let Some(host) = &self.host else {
+                    return Task::none();
+                };
+                if self.composer.is_none() {
+                    diagnostics::event(Event::DialogOpen);
+                    self.host_menu = false;
+                    self.drawer = None;
+                    self.composer = Some(Composer::new(host.is_local()));
+                    self.fitted = Some(0);
+                    self.rebuild();
+                }
+                Task::none()
+            }
+            Message::Composer(message) => self.update_composer(message),
             Message::SetTab(tab) => {
                 if let Some(drawer) = &mut self.drawer {
                     drawer.tab = tab;
@@ -492,7 +554,14 @@ impl App {
                 }
                 Task::none()
             }
+            Message::WindowHeight(height) => {
+                self.window_height = height;
+                Task::none()
+            }
             Message::ResizeDrawer(event) => {
+                if self.composer.is_some() {
+                    self.fitted = None;
+                }
                 self.panes.resize(event.split, event.ratio.clamp(0.2, 0.85));
                 Task::none()
             }
@@ -679,13 +748,10 @@ impl App {
     fn rebuild(&mut self) {
         let _span = diagnostics::span(Phase::Rebuild).entered();
         self.cache.clear();
-        let Some(snapshot) = self.snapshot.as_ref().filter(|s| s.scope == self.scope) else {
-            self.tracks.clear();
-            return;
-        };
-
+        let snapshot = self.snapshot.as_ref().filter(|s| s.scope == self.scope);
         let mut tracks: Vec<Track> = snapshot
-            .timers
+            .map(|snapshot| snapshot.timers.as_slice())
+            .unwrap_or_default()
             .iter()
             .map(|timer| {
                 let mut subtitle = label::schedule(timer);
@@ -698,13 +764,11 @@ impl App {
                 Track {
                     title: timer.name().to_owned(),
                     subtitle,
-                    marks: timeline::marks(
-                        timer,
-                        &snapshot.downtime,
-                        snapshot.history_known,
-                        self.now,
-                    ),
+                    marks: snapshot.map_or_else(Vec::new, |snapshot| {
+                        timeline::marks(timer, &snapshot.downtime, snapshot.history_known, self.now)
+                    }),
                     timer: timer.clone(),
+                    draft: false,
                 }
             })
             .collect();
@@ -722,7 +786,31 @@ impl App {
             tracks.iter().map(|track| track.marks.len()).sum(),
             0,
         );
+
+        // The draft leads, so it is in view while the schedule is typed.
+        if let Some(composer) = &self.composer {
+            let timer = composer.draft(self.now);
+            let marks = timer.as_ref().map_or_else(Vec::new, |timer| {
+                // It never ran, so only what is ahead is drawn.
+                timeline::marks(timer, &[], false, self.now)
+            });
+            tracks.insert(
+                0,
+                Track {
+                    title: composer.title(),
+                    subtitle: composer.subtitle(),
+                    marks,
+                    timer: timer.unwrap_or_else(composer::placeholder),
+                    draft: true,
+                },
+            );
+        }
         self.tracks = tracks;
+
+        // Timers may arrive or the scope change while composing.
+        if self.composer.is_some() && self.fitted.is_some_and(|rows| rows != self.tracks.len()) {
+            self.fit_music_box();
+        }
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -741,6 +829,16 @@ impl App {
             container(text(message).color(palette::MUTED))
                 .center(Length::Fill)
                 .into()
+        } else if let Some(composer) = &self.composer {
+            PaneGrid::new(&self.panes, move |_, pane, _| {
+                pane_grid::Content::new(match pane {
+                    Pane::MusicBox => self.music_box(),
+                    Pane::Drawer => composer.view(self.scope, self.now, &self.tz),
+                })
+            })
+            .spacing(12)
+            .on_resize(12, Message::ResizeDrawer)
+            .into()
         } else {
             let open = self.drawer.as_ref().and_then(|drawer| {
                 let index = self
@@ -887,6 +985,152 @@ impl App {
                 Task::none()
             }
         }
+    }
+
+    fn update_composer(&mut self, message: ComposerMessage) -> Task<Message> {
+        let Some(composer) = self.composer.as_mut() else {
+            return Task::none();
+        };
+        match message {
+            ComposerMessage::Edit(field) => {
+                let reschedule = composer.update(field);
+                self.rebuild();
+                if reschedule {
+                    self.preview_schedule()
+                } else {
+                    Task::none()
+                }
+            }
+            ComposerMessage::Rhythm(edit) => {
+                composer.edit(edit);
+                self.preview_schedule()
+            }
+            ComposerMessage::Hint(hint) => {
+                composer.set_hint(hint);
+                Task::none()
+            }
+            ComposerMessage::Mode(mode) => {
+                composer.set_mode(mode);
+                self.preview_schedule()
+            }
+            ComposerMessage::Previewed(revision, Some(result)) if composer.is_current(revision) => {
+                composer.schedule = match result {
+                    Ok(previews) => Schedule::Ready(previews),
+                    Err(reason) => Schedule::Invalid(reason),
+                };
+                self.rebuild();
+                Task::none()
+            }
+            ComposerMessage::Previewed(..) => Task::none(),
+            ComposerMessage::ToggleFiles => {
+                composer.toggle_files();
+                Task::none()
+            }
+            ComposerMessage::Create if composer.creating => Task::none(),
+            ComposerMessage::Create => {
+                let Some(host) = self.host.clone() else {
+                    return Task::none();
+                };
+                let timer = match composer.timer() {
+                    Ok(timer) => timer,
+                    Err(error) => {
+                        composer.error = Some(error);
+                        return Task::none();
+                    }
+                };
+                composer.creating = true;
+                composer.error = None;
+                let scope = self.scope;
+                Task::perform(
+                    async move {
+                        systemd::create(host.as_ref(), scope, &timer)
+                            .await
+                            .map_err(|error| match error {
+                                systemd::Error::UnitExists(name) => {
+                                    fl!("timer-form-error-exists", name = name)
+                                }
+                                systemd::Error::PasswordRequired => {
+                                    fl!("timer-form-error-password")
+                                }
+                                error => error.to_string(),
+                            })
+                    },
+                    |result| Message::Composer(ComposerMessage::Created(result)),
+                )
+            }
+            ComposerMessage::Created(Ok(())) => {
+                diagnostics::event(Event::DialogClose);
+                // The real timer takes the draft's place on the next snapshot.
+                self.composer = None;
+                self.rebuild();
+                self.load()
+            }
+            ComposerMessage::Created(Err(error)) => {
+                composer.creating = false;
+                composer.error = Some(error);
+                Task::none()
+            }
+            ComposerMessage::Cancel => {
+                diagnostics::event(Event::DialogClose);
+                self.composer = None;
+                self.rebuild();
+                Task::none()
+            }
+        }
+    }
+
+    /// Splits the body so the music box shows its tracks, up to a few,
+    /// and the composer gets the rest. The split stays draggable.
+    fn fit_music_box(&mut self) {
+        self.fitted = Some(self.tracks.len());
+        let body = self.window_height - BODY_TOP - BELOW_BODY;
+        let music_box = musicbox::height(self.tracks.len(), false).min(MUSIC_BOX_WHILE_COMPOSING)
+                // Half the split's spacing, and a little air.
+                + 12.0;
+        if let pane_grid::Node::Split { id, .. } = self.panes.layout() {
+            self.panes.resize(*id, (music_box / body).clamp(0.2, 0.6));
+        }
+    }
+
+    /// Asks systemd for the composed schedule's elapses in the fetched
+    /// window, once changes pause; a preview superseded while waiting is
+    /// never asked for.
+    fn preview_schedule(&mut self) -> Task<Message> {
+        let (Some(composer), Some(host)) = (self.composer.as_mut(), self.host.clone()) else {
+            return Task::none();
+        };
+        let (revision, latest) = composer.next_revision();
+        let expressions = composer.expressions();
+        if expressions.is_empty() {
+            composer.schedule = Schedule::Empty;
+            self.rebuild();
+            return Task::none();
+        }
+        composer.schedule = Schedule::Checking;
+        self.rebuild();
+        let capabilities = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.capabilities)
+            .unwrap_or_default();
+        let window = self.zoom.fetch_window(self.host_now());
+        Task::perform(
+            async move {
+                tokio::time::sleep(SCHEDULE_PAUSE).await;
+                if latest.load(std::sync::atomic::Ordering::SeqCst) != revision {
+                    return None;
+                }
+                let result =
+                    systemd::calendar::preview(host.as_ref(), &expressions, window, capabilities)
+                        .await
+                        .map_err(|error| match error {
+                            systemd::Error::Command { stderr, .. } => stderr,
+                            error => error.to_string(),
+                        });
+                Some(result)
+            },
+            move |result| Message::Composer(ComposerMessage::Previewed(revision, result)),
+        )
     }
 
     /// Reads the host list again after the dialog changed `hosts.toml`.
@@ -1050,7 +1294,8 @@ impl App {
                 (t < 1.0).then(|| (index, color.scale_alpha(0.28 * (1.0 - t).powi(2))))
             })
             .collect();
-        let rows = musicbox::height(self.tracks.len());
+        let legend = self.composer.is_none();
+        let rows = musicbox::height(self.tracks.len(), legend);
         responsive(move |size| {
             // Below the minimum width the box keeps its size and scrolls
             // sideways; scrolling content must not fill its scroll axis.
@@ -1071,6 +1316,7 @@ impl App {
                     selected_run: selected.and_then(|(_, run)| run),
                     focus: self.drawer.as_ref().and_then(|drawer| drawer.focus),
                     flashes: flashes.clone(),
+                    legend,
                     cache: &self.cache,
                 })
                 .width(width)
@@ -1133,9 +1379,14 @@ impl App {
             .spacing(16)
             .align_y(iced::Alignment::Center);
 
+        let new_timer = controls::action(
+            fl!("new-timer"),
+            (self.host.is_some() && self.composer.is_none()).then_some(Message::OpenComposer),
+        );
+
         // Only the controls wrap, so a fill spacer cannot push them down
         // while there is still room beside the title.
-        let controls = row![scopes, zooms, refresh]
+        let controls = row![scopes, zooms, refresh, new_timer]
             .spacing(10)
             .align_y(iced::Alignment::Center)
             .wrap()
@@ -1311,6 +1562,7 @@ mod tests {
             history_known: true,
             clock: None,
             warnings: Vec::new(),
+            capabilities: crate::systemd::Capabilities::default(),
         }
     }
 
@@ -1334,5 +1586,400 @@ mod tests {
         assert_eq!(flashes(&old, &failed)[0].1, palette::FAILED);
         // Still the same failure on the next refresh: no new flash.
         assert!(flashes(&failed, &failed).is_empty());
+    }
+
+    /// Drives the app the way iced's runtime does: each event goes to a
+    /// user interface built from the current view with the previous one's
+    /// widget state, and its messages go to `update`. Tasks are dropped.
+    struct Harness {
+        app: App,
+        cache: iced_test::runtime::user_interface::Cache,
+        renderer: iced::Renderer,
+        cursor: iced::mouse::Cursor,
+    }
+
+    const SIZE: iced::Size = iced::Size::new(1280.0, 760.0);
+
+    impl Harness {
+        fn new(app: App) -> Self {
+            use iced_test::core::renderer::Headless;
+            let renderer =
+                iced_test::futures::futures::executor::block_on(<iced::Renderer as Headless>::new(
+                    iced::Font::DEFAULT,
+                    iced::Pixels(16.0),
+                    Some("tiny-skia"),
+                ))
+                .expect("headless renderer");
+            Self {
+                app,
+                cache: Default::default(),
+                renderer,
+                cursor: iced::mouse::Cursor::Unavailable,
+            }
+        }
+
+        fn send(&mut self, events: impl IntoIterator<Item = iced::Event>) {
+            for event in events {
+                let mut messages = Vec::new();
+                let mut ui = iced_test::runtime::UserInterface::build(
+                    self.app.view(),
+                    SIZE,
+                    std::mem::take(&mut self.cache),
+                    &mut self.renderer,
+                );
+                let _ = ui.update(
+                    &[event],
+                    self.cursor,
+                    &mut self.renderer,
+                    &mut iced_test::core::clipboard::Null,
+                    &mut messages,
+                );
+                self.cache = ui.into_cache();
+                for message in messages {
+                    let _ = self.app.update(message);
+                }
+            }
+        }
+
+        fn find<S>(&mut self, selector: S) -> Option<S::Output>
+        where
+            S: iced_test::Selector + Send,
+            S::Output: Clone + Send,
+        {
+            use iced_test::core::widget::Operation;
+            let mut ui = iced_test::runtime::UserInterface::build(
+                self.app.view(),
+                SIZE,
+                std::mem::take(&mut self.cache),
+                &mut self.renderer,
+            );
+            let mut operation = selector.find();
+            ui.operate(
+                &self.renderer,
+                &mut iced_test::core::widget::operation::black_box(&mut operation),
+            );
+            self.cache = ui.into_cache();
+            match operation.finish() {
+                iced_test::core::widget::operation::Outcome::Some(found) => found,
+                _ => None,
+            }
+        }
+
+        fn click(&mut self, id: &'static str) {
+            let target = self
+                .find(iced_test::selector::id(id))
+                .unwrap_or_else(|| panic!("{id} not found"));
+            // A click only lands where the widget is on screen.
+            let visible = target
+                .visible_bounds()
+                .filter(|visible| visible.height + 1.0 >= target.bounds().height)
+                .unwrap_or_else(|| panic!("{id} is scrolled out of view"));
+            self.cursor = iced::mouse::Cursor::Available(visible.center());
+            self.send(iced_test::simulator::click());
+        }
+
+        fn type_text(&mut self, text: &str) {
+            for event in iced_test::simulator::typewrite(text).collect::<Vec<_>>() {
+                self.send([event]);
+                // The runtime redraws after every change.
+                self.send([iced::Event::Window(iced::window::Event::RedrawRequested(
+                    iced::time::Instant::now(),
+                ))]);
+            }
+        }
+
+        fn focused(&mut self) -> Option<String> {
+            self.find(iced_test::selector::is_focused())
+                .map(|target| format!("{target:?}"))
+        }
+    }
+
+    fn composing() -> App {
+        let (mut app, _) = App::new(Vec::new(), None, Vec::new());
+        app.composer = Some(Composer::new(true));
+        app.fitted = Some(0);
+        app.rebuild();
+        app
+    }
+
+    fn typing_keeps_focus(app: App) {
+        let mut harness = Harness::new(app);
+        for (field, text) in [
+            (
+                composer::Field::Name as fn(String) -> composer::Field,
+                "backup",
+            ),
+            (composer::Field::Description, "Back up my documents"),
+            (composer::Field::Command, "/usr/bin/true"),
+        ] {
+            let id = composer::field_id(field);
+            harness.click(id);
+            harness.type_text(text);
+            assert!(
+                harness
+                    .focused()
+                    .is_some_and(|focused| focused.contains(id)),
+                "{id} lost the focus: {:?}",
+                harness.focused()
+            );
+            assert!(
+                harness.find(text).is_some(),
+                "{id} holds only part of {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn composer_fields_keep_the_focus_while_typing() {
+        let _language = crate::i18n::test_language("en");
+        let mut failed = Vec::new();
+        for (timers, ready, files) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+            (true, true, true),
+        ] {
+            let mut app = composing();
+            let now = app.now;
+            if timers {
+                app.snapshot = Some(Arc::new(snapshot(vec![timer(Vec::new())])));
+            }
+            let composer = app.composer.as_mut().unwrap();
+            if ready {
+                composer.update_rhythm_for_test();
+                composer.schedule = Schedule::Ready(vec![systemd::calendar::Preview {
+                    normalized: "*-*-* 03:00:00".to_owned(),
+                    occurrences: vec![now + SignedDuration::from_hours(5)],
+                }]);
+            }
+            if files {
+                composer.toggle_files();
+            }
+            app.rebuild();
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| typing_keeps_focus(app)))
+                .is_err()
+            {
+                failed.push((timers, ready, files));
+            }
+        }
+        assert!(
+            failed.is_empty(),
+            "focus lost with (timers, ready, files) = {failed:?}"
+        );
+    }
+
+    /// The way a person gets there: this machine's timers, the composer
+    /// opened from the header, keys typed while the clock ticks.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn composer_opened_from_the_header_keeps_the_focus() {
+        let _language = crate::i18n::test_language("en");
+        let local = HostEntry {
+            id: "local".to_owned(),
+            name: "here".to_owned(),
+            kind: hosts::HostKind::Local,
+            origin: Origin::ThisComputer,
+            saved: None,
+        };
+        let (mut app, _) = App::new(vec![local], Some(0), Vec::new());
+        let _ = app.update(Message::Loaded(
+            app.generation,
+            Ok(Arc::new(snapshot(vec![timer(Vec::new())]))),
+        ));
+        let _ = app.update(Message::OpenComposer);
+        // A painted rhythm whose preview arrives while the name is typed.
+        let _ = app.update(Message::Composer(ComposerMessage::Rhythm(
+            rhythm::Edit::Preset(rhythm::Preset::Nightly),
+        )));
+        let revision = app.composer.as_ref().unwrap().revision_for_test();
+        let now = app.now;
+        let mut harness = Harness::new(app);
+        let id = composer::field_id(composer::Field::Name);
+        harness.click(id);
+        for (index, key) in "backup".chars().enumerate() {
+            harness.type_text(&key.to_string());
+            if index == 0 {
+                let _ = harness
+                    .app
+                    .update(Message::Composer(ComposerMessage::Previewed(
+                        revision,
+                        Some(Ok(vec![systemd::calendar::Preview {
+                            normalized: "*-*-* 03:00:00".to_owned(),
+                            occurrences: vec![now + SignedDuration::from_hours(5)],
+                        }])),
+                    )));
+            }
+            let _ = harness.app.update(Message::Tick);
+            assert!(
+                harness
+                    .focused()
+                    .is_some_and(|focused| focused.contains(id)),
+                "lost after {key:?}"
+            );
+        }
+        assert!(harness.find("backup").is_some());
+    }
+
+    /// Renders the composer in a few states to PNG files for a look,
+    /// without a display. Run with
+    /// `SYSORBIT_SNAPSHOTS=/some/dir cargo test composer_snapshots -- --ignored`.
+    #[test]
+    #[ignore = "writes images for people to look at"]
+    fn composer_snapshots() {
+        let Some(directory) = std::env::var_os("SYSORBIT_SNAPSHOTS") else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(directory);
+        let _language = crate::i18n::test_language("en");
+        let render = |app: &App, name: &str| {
+            let path = directory.join(name);
+            // The file name gets the renderer's name; an old one would be
+            // compared instead of replaced.
+            for entry in std::fs::read_dir(&directory)
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                if entry.file_name().to_string_lossy().starts_with(name) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+            let mut simulator =
+                iced_test::Simulator::with_size(iced::Settings::default(), SIZE, app.view());
+            let snapshot = simulator.snapshot(&app.theme()).expect("snapshot");
+            assert!(snapshot.matches_image(&path).expect("write"));
+        };
+
+        render(&composing(), "0-no-timers");
+        let mut app = composing();
+        app.snapshot = Some(Arc::new(snapshot(vec![timer(Vec::new())])));
+        app.rebuild();
+        render(&app, "1-empty");
+
+        let now = app.now;
+        let composer = app.composer.as_mut().unwrap();
+        composer.update(composer::Field::Name("backup".to_owned()));
+        composer.update(composer::Field::Command(
+            "/usr/bin/rsync -a /home/me/docs /mnt/backup".to_owned(),
+        ));
+        composer.edit(rhythm::Edit::Preset(rhythm::Preset::WorkdayMornings));
+        composer.edit(rhythm::Edit::Paint {
+            day: 5,
+            hour: 10,
+            on: true,
+        });
+        composer.schedule = Schedule::Ready(vec![
+            systemd::calendar::Preview {
+                normalized: "Mon..Fri *-*-* 09:00:00".to_owned(),
+                occurrences: (1..4)
+                    .map(|day| now + SignedDuration::from_hours(24 * day))
+                    .collect(),
+            },
+            systemd::calendar::Preview {
+                normalized: "Sat *-*-* 10:00:00".to_owned(),
+                occurrences: vec![now + SignedDuration::from_hours(30)],
+            },
+        ]);
+        composer.set_hint(Some(rhythm::Hint::Cell(2, 9)));
+        app.rebuild();
+        render(&app, "2-filled");
+    }
+
+    #[test]
+    fn filling_in_the_composer_does_not_move_its_fields() {
+        let _language = crate::i18n::test_language("en");
+        let mut harness = Harness::new(composing());
+        let name = composer::field_id(composer::Field::Name);
+        let place = |harness: &mut Harness| {
+            harness
+                .find(iced_test::selector::id(name))
+                .expect("name field")
+                .bounds()
+                .y
+        };
+        let empty = place(&mut harness);
+
+        let now = harness.app.now;
+        let composer = harness.app.composer.as_mut().unwrap();
+        composer.update(composer::Field::Name("db-dump".to_owned()));
+        composer.update(composer::Field::Command(
+            "/usr/local/bin/dump-databases --all --compress".to_owned(),
+        ));
+        composer.schedule = Schedule::Checking;
+        harness.app.rebuild();
+        assert_eq!(place(&mut harness), empty, "while systemd is asked");
+
+        let composer = harness.app.composer.as_mut().unwrap();
+        composer.schedule = Schedule::Ready(vec![
+            systemd::calendar::Preview {
+                normalized: "Mon..Fri *-*-* 09,18:00:00".to_owned(),
+                occurrences: vec![now + SignedDuration::from_hours(3)],
+            },
+            systemd::calendar::Preview {
+                normalized: "Sat *-*-* 10:00:00".to_owned(),
+                occurrences: vec![now + SignedDuration::from_hours(30)],
+            },
+        ]);
+        harness.app.rebuild();
+        assert_eq!(place(&mut harness), empty, "once systemd answered");
+
+        let composer = harness.app.composer.as_mut().unwrap();
+        composer.schedule = Schedule::Invalid("Failed to parse calendar specification".to_owned());
+        harness.app.rebuild();
+        assert_eq!(place(&mut harness), empty, "with systemd's complaint");
+    }
+
+    #[test]
+    fn the_composer_split_fits_the_tracks_and_can_be_dragged() {
+        let _language = crate::i18n::test_language("en");
+        let mut harness = Harness::new(composing());
+        let ratio = |app: &App| match app.panes.layout() {
+            pane_grid::Node::Split { ratio, .. } => *ratio,
+            pane_grid::Node::Pane(_) => panic!("no split"),
+        };
+        // One draft track needs little room.
+        assert!(ratio(&harness.app) < 0.35, "{}", ratio(&harness.app));
+
+        let name = |harness: &mut Harness| {
+            harness
+                .find(iced_test::selector::id(composer::field_id(
+                    composer::Field::Name,
+                )))
+                .expect("name field")
+                .bounds()
+                .y
+        };
+        let before = name(&mut harness);
+        let pane_grid::Node::Split { id, .. } = *harness.app.panes.layout() else {
+            panic!("no split");
+        };
+        let _ = harness
+            .app
+            .update(Message::ResizeDrawer(pane_grid::ResizeEvent {
+                split: id,
+                ratio: 0.6,
+            }));
+        assert!((ratio(&harness.app) - 0.6).abs() < 0.001);
+        assert!(name(&mut harness) > before + 100.0, "the form moved down");
+
+        // Once dragged, new timers leave the split alone.
+        harness.app.snapshot = Some(Arc::new(snapshot(vec![timer(Vec::new())])));
+        harness.app.rebuild();
+        assert!((ratio(&harness.app) - 0.6).abs() < 0.001);
+    }
+
+    #[test]
+    fn the_split_follows_the_tracks_until_dragged() {
+        let _language = crate::i18n::test_language("en");
+        let mut app = composing();
+        let ratio = |app: &App| match app.panes.layout() {
+            pane_grid::Node::Split { ratio, .. } => *ratio,
+            pane_grid::Node::Pane(_) => panic!("no split"),
+        };
+        let alone = ratio(&app);
+        app.snapshot = Some(Arc::new(snapshot(vec![timer(Vec::new())])));
+        app.rebuild();
+        assert!(ratio(&app) > alone, "{} > {alone}", ratio(&app));
     }
 }

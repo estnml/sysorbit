@@ -1,7 +1,7 @@
 //! Buttons shared by the header and the drawer. Related choices sit together
 //! in one framed group; the current one is lifted, the others stay quiet.
 
-use iced::widget::{Row, button, container, text};
+use iced::widget::{Row, button, container, text, tooltip};
 use iced::{Border, Color, Element, Length};
 
 use super::{Message, palette};
@@ -107,6 +107,28 @@ pub fn dot<'a>(color: Color) -> Element<'a, Message> {
             ..container::Style::default()
         })
         .into()
+}
+
+/// A small ⓘ that explains a term on hover.
+pub fn info<'a>(help: String) -> Element<'a, Message> {
+    tooltip(
+        text("ⓘ").size(12).color(palette::MUTED),
+        container(text(help).size(12))
+            .padding(10)
+            .max_width(340)
+            .style(|_| container::Style {
+                background: Some(palette::GRID.into()),
+                border: Border {
+                    color: palette::GRID_MAJOR,
+                    width: 1.0,
+                    radius: 8.0.into(),
+                },
+                ..container::Style::default()
+            }),
+        tooltip::Position::Bottom,
+    )
+    .gap(6)
+    .into()
 }
 
 fn frame<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
