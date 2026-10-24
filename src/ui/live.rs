@@ -10,6 +10,7 @@ use tokio::time::{Instant, timeout_at};
 
 use super::Message;
 use crate::host::Host;
+use crate::i18n::fl;
 use crate::model::{Scope, Snapshot};
 use crate::systemd::watch;
 
@@ -104,9 +105,7 @@ fn events(watch: &Watch) -> impl Stream<Item = Event> + use<> {
                 let _ = output.send(Event::Changed).await;
             }
 
-            let _ = output
-                .send(Event::Lost("connection to systemd closed".to_owned()))
-                .await;
+            let _ = output.send(Event::Lost(fl!("live-closed"))).await;
             tokio::time::sleep(RETRY).await;
         }
     })

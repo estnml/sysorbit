@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use jiff::{SignedDuration, Timestamp};
 
+use crate::i18n::fl;
 use crate::model::Interval;
 
 /// Fraction of the grid width left of the comb. The comb stays put while the
@@ -22,12 +23,12 @@ pub enum Zoom {
 impl Zoom {
     pub const ALL: [Zoom; 4] = [Zoom::Hours, Zoom::Day, Zoom::Week, Zoom::Month];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Zoom::Hours => "6 hours",
-            Zoom::Day => "Day",
-            Zoom::Week => "Week",
-            Zoom::Month => "Month",
+            Zoom::Hours => fl!("zoom-hours"),
+            Zoom::Day => fl!("zoom-day"),
+            Zoom::Week => fl!("zoom-week"),
+            Zoom::Month => fl!("zoom-month"),
         }
     }
 

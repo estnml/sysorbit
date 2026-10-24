@@ -11,7 +11,7 @@ use zbus::Connection;
 use zbus_systemd::systemd1::{ManagerProxy, TimerProxy, UnitProxy};
 
 use super::Error;
-use crate::model::{CalendarTrigger, MonotonicBase, MonotonicTrigger, Timer};
+use crate::model::{CalendarTrigger, MonotonicBase, MonotonicTrigger, Timer, Warning};
 
 /// Loads every timer unit: installed unit files plus loaded instances.
 /// Templates (`foo@.timer`) are skipped, they cannot run by themselves.
@@ -22,7 +22,7 @@ use crate::model::{CalendarTrigger, MonotonicBase, MonotonicTrigger, Timer};
 pub async fn load(
     bus: &Connection,
     clock_offset: Option<SignedDuration>,
-) -> Result<(Vec<Timer>, Vec<String>), Error> {
+) -> Result<(Vec<Timer>, Vec<Warning>), Error> {
     let manager = ManagerProxy::new(bus).await?;
     let patterns = vec!["*.timer".to_owned()];
     let files = manager
@@ -49,7 +49,10 @@ pub async fn load(
     for (name, result) in names.iter().zip(results) {
         match result {
             Ok(timer) => timers.push(timer),
-            Err(error) => warnings.push(format!("{name} unreadable: {error}")),
+            Err(error) => warnings.push(Warning::Unreadable {
+                unit: name.clone(),
+                error: error.to_string(),
+            }),
         }
     }
 

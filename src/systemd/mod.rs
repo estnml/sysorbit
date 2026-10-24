@@ -15,7 +15,7 @@ use jiff::Timestamp;
 pub use capabilities::Capabilities;
 
 use crate::host::{Host, Invocation};
-use crate::model::{Interval, Scope, Snapshot};
+use crate::model::{Interval, Scope, Snapshot, Warning};
 
 #[derive(Debug, Clone)]
 pub enum Error {
@@ -81,7 +81,7 @@ pub async fn snapshot(host: &dyn Host, scope: Scope, window: Interval) -> Result
     let mut warnings = Vec::new();
     let (bus, clock_offset) = tokio::join!(host.bus(scope), journal::clock_offset(host));
     let clock_offset = clock_offset.unwrap_or_else(|error| {
-        warnings.push(format!("Monotonic times unavailable: {error}"));
+        warnings.push(Warning::MonotonicUnavailable(error.to_string()));
         None
     });
     let bus = bus?;
@@ -115,11 +115,11 @@ pub async fn snapshot(host: &dyn Host, scope: Scope, window: Interval) -> Result
 
     let history_known = history.is_ok();
     let mut history = history.unwrap_or_else(|error| {
-        warnings.push(format!("History unavailable: {error}"));
+        warnings.push(Warning::HistoryUnavailable(error.to_string()));
         journal::History::default()
     });
     let downtime = downtime.unwrap_or_else(|error| {
-        warnings.push(format!("Downtime unavailable: {error}"));
+        warnings.push(Warning::DowntimeUnavailable(error.to_string()));
         Vec::new()
     });
 
@@ -276,7 +276,12 @@ mod tests {
             assert!(boot.next_elapse.is_some(), "{name}: monotonic next");
             assert!(snapshot.history_known, "{name}: history");
             assert!(
-                !snapshot.warnings.iter().any(|w| w.contains("unavailable")),
+                !snapshot.warnings.iter().any(|warning| matches!(
+                    warning,
+                    Warning::MonotonicUnavailable(_)
+                        | Warning::HistoryUnavailable(_)
+                        | Warning::DowntimeUnavailable(_)
+                )),
                 "{name}: {:?}",
                 snapshot.warnings
             );

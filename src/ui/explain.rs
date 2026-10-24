@@ -1,70 +1,40 @@
-//! Plain English for timer triggers, e.g. `Mon..Fri *-*-* 03:00:00` becomes
-//! "On weekdays at 03:00".
+//! Plain words for timer triggers, e.g. `Mon..Fri *-*-* 03:00:00` becomes
+//! "On weekdays at 03:00", in the current language.
 //!
 //! Works on the normalized `OnCalendar=` form systemd reports over D-Bus:
 //! `[weekdays] year-month-day hour:minute:second [timezone]`, where each
 //! component is `*` or a comma separated list of `start[..stop][/repeat]`,
 //! and `~` before the day counts days from the end of the month. Common
 //! shapes get a sentence; anything else is still described field by field.
+//! The sentences are assembled from Fluent messages, so each language
+//! decides the order of the pieces.
 
-use jiff::SignedDuration;
-
+use super::label::{self, join, ordinal};
+use crate::i18n::{self, fl};
 use crate::model::{MonotonicBase, MonotonicTrigger};
 
 /// Describes a normalized `OnCalendar=` expression. `None` only for input
 /// that is not in systemd's normalized form.
 pub fn calendar(expression: &str) -> Option<String> {
     let spec = Spec::parse(expression)?;
-    let mut sentence = spec.sentence();
-    if let Some(zone) = &spec.zone {
-        sentence.push_str(&format!(" ({zone} time)"));
-    }
-    Some(capitalize(&sentence))
+    let sentence = spec.sentence();
+    let sentence = match &spec.zone {
+        Some(zone) => fl!("explain-zone", sentence = sentence, zone = zone.as_str()),
+        None => sentence,
+    };
+    Some(i18n::capitalize(&sentence))
 }
 
 /// Describes a monotonic trigger such as `OnBootSec=15min`.
 pub fn monotonic(trigger: &MonotonicTrigger) -> String {
-    let offset = span_words(trigger.offset);
+    let span = label::span_words(trigger.offset);
     match trigger.base {
-        MonotonicBase::TimerActivated => format!("{offset} after the timer was started"),
-        MonotonicBase::Boot => format!("{offset} after boot"),
-        MonotonicBase::Startup => {
-            format!("{offset} after the service manager started (for user timers: login)")
-        }
-        MonotonicBase::UnitActivated => {
-            format!("Every {offset}, counted from the last time the service started")
-        }
-        MonotonicBase::UnitDeactivated => {
-            format!("{offset} after the service last finished, again after every run")
-        }
+        MonotonicBase::TimerActivated => fl!("explain-after-activation", span = span),
+        MonotonicBase::Boot => fl!("explain-after-boot", span = span),
+        MonotonicBase::Startup => fl!("explain-after-startup", span = span),
+        MonotonicBase::UnitActivated => fl!("explain-after-unit-active", span = span),
+        MonotonicBase::UnitDeactivated => fl!("explain-after-unit-inactive", span = span),
     }
-}
-
-/// `1 day 2 hours`, keeping the two largest units.
-pub fn span_words(span: SignedDuration) -> String {
-    const UNITS: [(&str, i64); 6] = [
-        ("week", 604_800_000),
-        ("day", 86_400_000),
-        ("hour", 3_600_000),
-        ("minute", 60_000),
-        ("second", 1000),
-        ("millisecond", 1),
-    ];
-
-    let mut millis = span.as_millis().abs() as i64;
-    if millis == 0 {
-        return "0 seconds".to_owned();
-    }
-    let parts: Vec<String> = UNITS
-        .iter()
-        .filter_map(|&(name, size)| {
-            let count = millis / size;
-            millis %= size;
-            (count > 0).then(|| plural(count, name))
-        })
-        .take(2)
-        .collect();
-    parts.join(" ")
 }
 
 /// One `start[..stop][/repeat]` element of a component.
@@ -141,12 +111,15 @@ impl Spec {
     fn sentence(&self) -> String {
         let time = self.time();
         let restrictions = self.date();
+        let date = restrictions.join(" ");
 
         match (restrictions.is_empty(), time) {
-            (true, Time::At(times)) => format!("every day at {}", join(&times)),
+            (true, Time::At(times)) => fl!("explain-daily", time = at(&times)),
             (true, Time::Repeat(phrase)) => phrase,
-            (false, Time::At(times)) => format!("{} at {}", restrictions.join(" "), join(&times)),
-            (false, Time::Repeat(phrase)) => format!("{phrase}, {}", restrictions.join(" ")),
+            (false, Time::At(times)) => fl!("explain-dated", date = date, time = at(&times)),
+            (false, Time::Repeat(phrase)) => {
+                fl!("explain-repeat-dated", repeat = phrase, date = date)
+            }
         }
     }
 
@@ -167,44 +140,57 @@ impl Spec {
         // A weekday inside a seven day stretch is "the nth weekday".
         let nth = match (&weekdays, &day, self.from_end) {
             (Some(Shape::One(weekday)), Shape::Range(1, 7), true) => {
-                Some(format!("on the last {}", weekday_singular(*weekday)))
+                Some((fl!("nth-last"), *weekday))
             }
             (Some(Shape::One(weekday)), Shape::Range(start, end), false)
                 if end - start == 6 && start % 7 == 1 && *start <= 22 =>
             {
-                let which = ["first", "second", "third", "fourth"][(*start / 7) as usize];
-                Some(format!("on the {which} {}", weekday_singular(*weekday)))
+                let nth = match start / 7 {
+                    0 => fl!("nth-1"),
+                    1 => fl!("nth-2"),
+                    2 => fl!("nth-3"),
+                    _ => fl!("nth-4"),
+                };
+                Some((nth, *weekday))
             }
             _ => None,
         };
 
         match nth {
-            Some(phrase) => {
-                parts.push(phrase);
-                parts.push(match &month {
-                    Shape::Every => "of every month".to_owned(),
-                    month => format!("of {}", month_words(month)),
-                });
-            }
+            Some((nth, weekday)) => parts.push(fl!(
+                "explain-nth-weekday",
+                nth = nth,
+                weekday = weekday_singular(weekday),
+                months = months_of(&month)
+            )),
             None => {
                 if let Some(weekdays) = &weekdays {
                     parts.push(weekday_words(weekdays));
                 }
                 match (&day, &month) {
                     (Shape::Every, Shape::Every) => {}
-                    (Shape::Every, Shape::Range(a, b)) => {
-                        parts.push(format!("from {} to {}", month_name(*a), month_name(*b)))
-                    }
-                    (Shape::Every, month) => parts.push(format!("in {}", month_words(month))),
+                    (Shape::Every, Shape::Range(a, b)) => parts.push(fl!(
+                        "explain-month-range",
+                        from = month_name(*a),
+                        to = month_name(*b)
+                    )),
+                    (Shape::Every, month) => parts.push(fl!(
+                        "explain-in-months",
+                        months = month_words(month),
+                        count = month.len()
+                    )),
                     (Shape::One(day), Shape::One(month)) if !self.from_end => {
-                        parts.push(format!("on {day} {}", month_name(*month)));
+                        parts.push(fl!(
+                            "explain-date",
+                            day = (*day),
+                            month = month_name(*month)
+                        ));
                     }
-                    (day, Shape::Every) => {
-                        parts.push(format!("{} of every month", self.day_words(day)));
-                    }
-                    (day, month) => {
-                        parts.push(format!("{} of {}", self.day_words(day), month_words(month)));
-                    }
+                    (day, month) => parts.push(fl!(
+                        "explain-day-of",
+                        day = self.day_words(day),
+                        months = months_of(month)
+                    )),
                 }
             }
         }
@@ -218,28 +204,28 @@ impl Spec {
     fn day_words(&self, day: &Shape) -> String {
         if self.from_end {
             return match day {
-                Shape::One(1) => "on the last day".to_owned(),
-                Shape::One(n) => format!("on the {}-to-last day", ordinal(*n)),
-                Shape::Range(1, n) => format!("on the last {n} days"),
-                other => format!("on the {} days counted from the end", other.values_words()),
+                Shape::One(1) => fl!("explain-last-day"),
+                Shape::One(n) => fl!("explain-nth-last-day", nth = ordinal(*n)),
+                Shape::Range(1, n) => fl!("explain-last-n-days", n = (*n)),
+                other => fl!("explain-days-from-end", days = other.values_words()),
             };
         }
         match day {
-            Shape::Every => "every day".to_owned(),
-            Shape::One(n) => format!("on the {}", ordinal(*n)),
-            Shape::Range(a, b) => format!("on the {} to the {}", ordinal(*a), ordinal(*b)),
+            Shape::Every => String::new(),
+            Shape::One(n) => fl!("explain-day-one", day = ordinal(*n)),
+            Shape::Range(a, b) => fl!("explain-day-range", from = ordinal(*a), to = ordinal(*b)),
             Shape::Step {
                 start: 1, step: 2, ..
-            } => "on odd days".to_owned(),
+            } => fl!("explain-odd-days"),
             Shape::Step {
                 start: 2, step: 2, ..
-            } => "on even days".to_owned(),
+            } => fl!("explain-even-days"),
             Shape::Step { start, step, .. } => {
-                format!("every {step} days from the {}", ordinal(*start))
+                fl!("explain-every-n-days", n = (*step), from = ordinal(*start))
             }
             Shape::List(values) => {
                 let days: Vec<String> = values.iter().map(|&n| ordinal(n)).collect();
-                format!("on the {}", join(&days))
+                fl!("explain-day-list", days = join(&days))
             }
         }
     }
@@ -251,22 +237,24 @@ impl Spec {
 
         if second != Shape::One(0) {
             return match (&hour, &minute, &second) {
-                (Shape::Every, Shape::Every, Shape::Every) => Time::Repeat("every second".into()),
+                (Shape::Every, Shape::Every, Shape::Every) => {
+                    Time::Repeat(fl!("explain-every-second"))
+                }
                 (Shape::Every, Shape::Every, second) if second.clean_step(60).is_some() => {
                     let step = second.clean_step(60).unwrap_or(1);
-                    Time::Repeat(format!("every {step} seconds"))
+                    Time::Repeat(fl!("explain-every-n-seconds", n = step))
                 }
                 (Shape::Every, Shape::Every, Shape::One(s)) => {
-                    Time::Repeat(format!("every minute at second {s}"))
+                    Time::Repeat(fl!("explain-every-minute-at-second", second = (*s)))
                 }
                 (hour, minute, Shape::One(s)) if hour.len().saturating_mul(minute.len()) <= 4 => {
                     Time::At(times(hour, minute, Some(*s)))
                 }
-                _ => Time::Repeat(format!(
-                    "when the hour is {}, the minute {} and the second {}",
-                    hour.values_words(),
-                    minute.values_words(),
-                    second.values_words()
+                _ => Time::Repeat(fl!(
+                    "explain-fields",
+                    hours = hour.values_words(),
+                    minutes = minute.values_words(),
+                    seconds = second.values_words()
                 )),
             };
         }
@@ -277,33 +265,39 @@ impl Spec {
                 Time::At(times(hour, minute, None))
             }
             (hour, Shape::One(m)) => match hour {
-                Shape::Range(a, b) => Time::Repeat(format!(
-                    "every hour from {} to {}",
-                    hhmm(*a, *m),
-                    hhmm(*b, *m)
+                Shape::Range(a, b) => Time::Repeat(fl!(
+                    "explain-every-hour-range",
+                    from = hhmm(*a, *m),
+                    to = hhmm(*b, *m)
                 )),
                 Shape::Step { start, step, last } => {
-                    let at = if *m == 0 {
-                        String::new()
+                    Time::Repeat(if *start < *step && 24_u32.is_multiple_of(*step) {
+                        if *m == 0 {
+                            fl!("explain-every-n-hours", n = (*step))
+                        } else {
+                            fl!("explain-every-n-hours-at", n = (*step), minute = mark(*m))
+                        }
                     } else {
-                        format!(" at :{m:02}")
-                    };
-                    if *start < *step && 24_u32.is_multiple_of(*step) {
-                        Time::Repeat(format!("every {step} hours{at}"))
-                    } else {
-                        Time::Repeat(format!(
-                            "every {step} hours from {} to {}",
-                            hhmm(*start, *m),
-                            hhmm(*last, *m)
-                        ))
-                    }
+                        fl!(
+                            "explain-every-n-hours-range",
+                            n = (*step),
+                            from = hhmm(*start, *m),
+                            to = hhmm(*last, *m)
+                        )
+                    })
                 }
                 hour if hour.len() <= 8 => Time::At(times(hour, &Shape::One(*m), None)),
-                hour => Time::Repeat(format!("at :{m:02} past hours {}", hour.values_words())),
+                hour => Time::Repeat(fl!(
+                    "explain-past-hours",
+                    minute = mark(*m),
+                    hours = hour.values_words()
+                )),
             },
-            (hour, minute) => {
-                Time::Repeat(format!("{} {}", minute_words(minute), hour_window(hour)))
-            }
+            (hour, minute) => Time::Repeat(fl!(
+                "explain-repeat-window",
+                repeat = minute_words(minute),
+                window = hour_window(hour)
+            )),
         }
     }
 }
@@ -392,10 +386,15 @@ impl Shape {
     /// `9`, `9–17`, `8, 10 and 12`.
     fn values_words(&self) -> String {
         match self {
-            Self::Every => "any".to_owned(),
+            Self::Every => fl!("explain-any"),
             Self::Range(a, b) => format!("{a}–{b}"),
             Self::Step { start, step, last } if self.len() > 6 => {
-                format!("every {step} from {start} to {last}")
+                fl!(
+                    "explain-every-from-to",
+                    step = (*step),
+                    from = (*start),
+                    to = (*last)
+                )
             }
             other => {
                 let values: Vec<String> = other.values().iter().map(u32::to_string).collect();
@@ -486,33 +485,56 @@ fn parse_weekdays(text: &str) -> Option<Vec<u32>> {
     Some(days)
 }
 
+/// `at 06:00 and 18:00`
+fn at(times: &[String]) -> String {
+    fl!("explain-at", times = join(times))
+}
+
+/// A minute past the hour, `:05` in English.
+fn mark(minute: u32) -> String {
+    fl!("minute-mark", minute = format!("{minute:02}"))
+}
+
 fn minute_words(minute: &Shape) -> String {
     match minute {
-        Shape::Every => "every minute".to_owned(),
-        Shape::One(0) => "every hour".to_owned(),
-        Shape::One(m) => format!("every hour at :{m:02}"),
-        Shape::Range(a, b) => format!("every minute from :{a:02} to :{b:02} past the hour"),
+        Shape::Every => fl!("explain-every-minute"),
+        Shape::One(0) => fl!("explain-every-hour"),
+        Shape::One(m) => fl!("explain-every-hour-at", minute = mark(*m)),
+        Shape::Range(a, b) => fl!(
+            "explain-every-minute-between",
+            from = mark(*a),
+            to = mark(*b)
+        ),
         Shape::Step { start, step, last } => match minute.clean_step(60) {
-            Some(step) if *start == 0 => format!("every {step} minutes"),
-            Some(step) => format!("every {step} minutes from :{start:02}"),
+            Some(step) if *start == 0 => fl!("explain-every-n-minutes", n = step),
+            Some(step) => fl!(
+                "explain-every-n-minutes-from",
+                n = step,
+                minute = mark(*start)
+            ),
             None if minute.len() <= 6 => past_the_hour(&minute.values()),
-            None => format!("every {step} minutes from :{start:02} to :{last:02} past the hour"),
+            None => fl!(
+                "explain-every-n-minutes-between",
+                n = (*step),
+                from = mark(*start),
+                to = mark(*last)
+            ),
         },
         Shape::List(values) => past_the_hour(values),
     }
 }
 
 fn past_the_hour(minutes: &[u32]) -> String {
-    let minutes: Vec<String> = minutes.iter().map(|m| format!(":{m:02}")).collect();
-    format!("at {} past the hour", join(&minutes))
+    let minutes: Vec<String> = minutes.iter().map(|&m| mark(m)).collect();
+    fl!("explain-past-the-hour", minutes = join(&minutes))
 }
 
 fn hour_window(hour: &Shape) -> String {
     match hour {
         Shape::Every => String::new(),
-        Shape::One(h) => format!("between {} and {}", hhmm(*h, 0), hhmm(*h, 59)),
-        Shape::Range(a, b) => format!("between {} and {}", hhmm(*a, 0), hhmm(*b, 59)),
-        other => format!("during hours {}", other.values_words()),
+        Shape::One(h) => fl!("explain-between", from = hhmm(*h, 0), to = hhmm(*h, 59)),
+        Shape::Range(a, b) => fl!("explain-between", from = hhmm(*a, 0), to = hhmm(*b, 59)),
+        other => fl!("explain-during-hours", hours = other.values_words()),
     }
 }
 
@@ -536,67 +558,83 @@ fn hhmm(hour: u32, minute: u32) -> String {
 
 fn weekday_words(weekdays: &Shape) -> String {
     match weekdays {
-        Shape::Range(0, 4) => "on weekdays".to_owned(),
-        Shape::List(days) if days == &[5, 6] => "on weekends".to_owned(),
-        Shape::Range(a, b) => format!("from {} to {}", weekday_singular(*a), weekday_singular(*b)),
+        Shape::Range(0, 4) => fl!("explain-on-weekdays"),
+        Shape::List(days) if days == &[5, 6] => fl!("explain-on-weekends"),
+        Shape::Range(a, b) => fl!(
+            "explain-weekday-range",
+            from = weekday_singular(*a),
+            to = weekday_singular(*b)
+        ),
         other => {
-            let names: Vec<String> = other
-                .values()
-                .into_iter()
-                .map(|day| weekday_name(day).to_owned())
-                .collect();
-            format!("on {}", join(&names))
+            let names: Vec<String> = other.values().into_iter().map(weekday_plural).collect();
+            fl!("explain-on-days", days = join(&names))
         }
     }
 }
 
-fn weekday_name(day: u32) -> &'static str {
-    const NAMES: [&str; 7] = [
-        "Mondays",
-        "Tuesdays",
-        "Wednesdays",
-        "Thursdays",
-        "Fridays",
-        "Saturdays",
-        "Sundays",
-    ];
-    NAMES[day.min(6) as usize]
+/// The weekday as in "on Mondays".
+fn weekday_plural(day: u32) -> String {
+    match day {
+        0 => fl!("weekdays-mon"),
+        1 => fl!("weekdays-tue"),
+        2 => fl!("weekdays-wed"),
+        3 => fl!("weekdays-thu"),
+        4 => fl!("weekdays-fri"),
+        5 => fl!("weekdays-sat"),
+        _ => fl!("weekdays-sun"),
+    }
 }
 
-fn weekday_singular(day: u32) -> &'static str {
-    weekday_name(day).trim_end_matches('s')
+/// The weekday as in "from Monday to Friday".
+fn weekday_singular(day: u32) -> String {
+    match day {
+        0 => fl!("weekday-mon"),
+        1 => fl!("weekday-tue"),
+        2 => fl!("weekday-wed"),
+        3 => fl!("weekday-thu"),
+        4 => fl!("weekday-fri"),
+        5 => fl!("weekday-sat"),
+        _ => fl!("weekday-sun"),
+    }
+}
+
+/// The months a day belongs to, "every month" or "January and July".
+fn months_of(month: &Shape) -> String {
+    match month {
+        Shape::Every => fl!("explain-every-month"),
+        month => fl!(
+            "explain-months-of",
+            months = month_words(month),
+            count = month.len()
+        ),
+    }
 }
 
 fn month_words(month: &Shape) -> String {
     match month {
-        Shape::Range(a, b) => format!("{} to {}", month_name(*a), month_name(*b)),
+        Shape::Range(a, b) => format!("{}–{}", month_name(*a), month_name(*b)),
         other => {
-            let names: Vec<String> = other
-                .values()
-                .into_iter()
-                .map(|month| month_name(month).to_owned())
-                .collect();
+            let names: Vec<String> = other.values().into_iter().map(month_name).collect();
             join(&names)
         }
     }
 }
 
-fn month_name(month: u32) -> &'static str {
-    const NAMES: [&str; 12] = [
-        "January",
-        "February",
-        "March",
-        "April",
-        "May",
-        "June",
-        "July",
-        "August",
-        "September",
-        "October",
-        "November",
-        "December",
-    ];
-    NAMES[(month.clamp(1, 12) - 1) as usize]
+fn month_name(month: u32) -> String {
+    match month {
+        1 => fl!("month-1"),
+        2 => fl!("month-2"),
+        3 => fl!("month-3"),
+        4 => fl!("month-4"),
+        5 => fl!("month-5"),
+        6 => fl!("month-6"),
+        7 => fl!("month-7"),
+        8 => fl!("month-8"),
+        9 => fl!("month-9"),
+        10 => fl!("month-10"),
+        11 => fl!("month-11"),
+        _ => fl!("month-12"),
+    }
 }
 
 fn year_words(items: &[Item]) -> String {
@@ -607,74 +645,44 @@ fn year_words(items: &[Item]) -> String {
                 stop: None,
                 repeat: None,
             },
-        ] => format!("in {start}"),
+        ] => fl!("explain-in-year", year = (*start)),
         [
             Item {
                 start,
                 stop: Some(stop),
                 repeat: None,
             },
-        ] => format!("from {start} to {stop}"),
+        ] => fl!("explain-year-range", from = (*start), to = (*stop)),
         [
             Item {
                 start,
                 stop: None,
                 repeat: Some(step),
             },
-        ] => format!("every {step} years from {start}"),
+        ] => fl!("explain-every-n-years", n = (*step), from = (*start)),
         items => {
             let years: Vec<String> = expand(items, 9999).iter().map(u32::to_string).collect();
-            format!("in {}", join(&years))
+            fl!("explain-in-years", years = join(&years))
         }
-    }
-}
-
-fn ordinal(n: u32) -> String {
-    let suffix = match (n % 10, n % 100) {
-        (_, 11..=13) => "th",
-        (1, _) => "st",
-        (2, _) => "nd",
-        (3, _) => "rd",
-        _ => "th",
-    };
-    format!("{n}{suffix}")
-}
-
-fn plural(count: i64, unit: &str) -> String {
-    if count == 1 {
-        format!("1 {unit}")
-    } else {
-        format!("{count} {unit}s")
-    }
-}
-
-/// `a`, `a and b`, `a, b and c`.
-fn join(items: &[String]) -> String {
-    match items {
-        [] => String::new(),
-        [one] => one.clone(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    }
-}
-
-fn capitalize(text: &str) -> String {
-    let mut chars = text.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().chain(chars).collect(),
-        None => String::new(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jiff::SignedDuration;
 
     fn says(expression: &str) -> String {
         calendar(expression).unwrap_or_else(|| panic!("{expression} did not parse"))
     }
 
+    fn english() -> std::sync::MutexGuard<'static, ()> {
+        i18n::test_language("en")
+    }
+
     #[test]
     fn describes_systemd_shorthands() {
+        let _language = english();
         // minutely, hourly, daily, weekly, monthly, quarterly, semiannually, yearly
         assert_eq!(says("*-*-* *:*:00"), "Every minute");
         assert_eq!(says("*-*-* *:00:00"), "Every hour");
@@ -697,6 +705,7 @@ mod tests {
 
     #[test]
     fn describes_repeating_times() {
+        let _language = english();
         assert_eq!(says("*-*-* *:00/15:00"), "Every 15 minutes");
         assert_eq!(says("*-*-* *:05/15:00"), "Every 15 minutes from :05");
         assert_eq!(says("*-*-* *:30:00"), "Every hour at :30");
@@ -720,6 +729,7 @@ mod tests {
 
     #[test]
     fn describes_dates() {
+        let _language = english();
         assert_eq!(says("Mon..Fri *-*-* 03:00:00"), "On weekdays at 03:00");
         assert_eq!(says("Sat,Sun *-*-* 10:00:00"), "On weekends at 10:00");
         assert_eq!(
@@ -774,6 +784,7 @@ mod tests {
 
     #[test]
     fn falls_back_to_fields_for_unusual_times() {
+        let _language = english();
         assert_eq!(
             says("*-*-* 01,05,09:10..20:30"),
             "When the hour is 1, 5 and 9, the minute 10–20 and the second 30"
@@ -783,6 +794,7 @@ mod tests {
 
     #[test]
     fn describes_monotonic_triggers() {
+        let _language = english();
         let trigger = |base, mins| MonotonicTrigger {
             base,
             offset: SignedDuration::from_mins(mins),
@@ -796,8 +808,48 @@ mod tests {
             "Every 1 day 1 hour, counted from the last time the service started"
         );
         assert_eq!(
-            span_words(SignedDuration::from_millis(1500)),
-            "1 second 500 milliseconds"
+            label::span_words(SignedDuration::from_millis(1500)),
+            "1 second"
         );
+    }
+
+    #[test]
+    fn describes_in_turkish() {
+        let _language = i18n::test_language("tr");
+        assert_eq!(says("*-*-* 00:00:00"), "Her gün, saat 00:00");
+        assert_eq!(says("*-*-* *:00/15:00"), "15 dakikada bir");
+        assert_eq!(says("*-*-* *:30:00"), "Her saat 30 geçe");
+        assert_eq!(says("Mon..Fri *-*-* 03:00:00"), "Hafta içi, saat 03:00");
+        assert_eq!(
+            says("Mon,Wed,Fri *-*-* 06,18:00:00"),
+            "Pazartesi, Çarşamba ve Cuma günleri, saat 06:00 ve 18:00"
+        );
+        assert_eq!(says("*-*-01 00:00:00"), "Her ayın 1. günü, saat 00:00");
+        assert_eq!(
+            says("*-01,04,07,10-01 00:00:00"),
+            "Ocak, Nisan, Temmuz ve Ekim aylarının 1. günü, saat 00:00"
+        );
+        assert_eq!(says("*-01-01 00:00:00"), "1 Ocak günü, saat 00:00");
+        assert_eq!(
+            says("Fri *-*~07/1 17:00:00"),
+            "Her ayın son Cuma günü, saat 17:00"
+        );
+        assert_eq!(
+            says("Mon..Fri *-*-* 09..17:00/10:00"),
+            "Hafta içi, 09:00 ile 17:59 arasında 10 dakikada bir"
+        );
+        assert_eq!(
+            says("*-*-* 08/2:30:00"),
+            "08:30 ile 22:30 arasında 2 saatte bir"
+        );
+        assert_eq!(
+            says("*-*-* 02:00:00 Europe/Istanbul"),
+            "Her gün, saat 02:00 (Europe/Istanbul saatiyle)"
+        );
+        let boot = MonotonicTrigger {
+            base: MonotonicBase::Boot,
+            offset: SignedDuration::from_mins(15),
+        };
+        assert_eq!(monotonic(&boot), "Açılıştan 15 dakika sonra");
     }
 }

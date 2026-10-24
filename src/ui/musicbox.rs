@@ -13,8 +13,8 @@ use super::Message;
 use super::label;
 use super::palette;
 use super::scale::{TimeAxis, Zoom};
+use crate::i18n::fl;
 use crate::model::{Downtime, DowntimeKind, Interval, Outcome, Timer};
-use crate::systemd::timespan;
 use crate::timeline::Mark;
 
 /// Margin left of the labels and right of the grid; the header and the
@@ -299,7 +299,7 @@ impl MusicBox<'_> {
             Stroke::default().with_color(palette::COMB).with_width(2.0),
         );
         frame.fill_text(Text {
-            content: format!("now {}", label::clock(self.now, self.tz)),
+            content: fl!("now-clock", time = label::clock(self.now, self.tz)),
             position: Point::new(x, grid.y + grid.height + 16.0),
             color: palette::COMB,
             size: 12.0.into(),
@@ -894,20 +894,23 @@ fn describe(mark: &Mark, now: Timestamp, tz: &TimeZone) -> Vec<(String, Color)> 
             outcome,
         } => {
             let mut lines = vec![(
-                format!("Ran · {}", label::moment(*start, tz)),
+                fl!("mark-ran", moment = label::moment(*start, tz)),
                 palette::TEXT,
             )];
             match end {
                 Some(end) => lines.push((
-                    format!("took {}", timespan::format(end.duration_since(*start))),
+                    fl!("mark-took", span = label::span(end.duration_since(*start))),
                     palette::MUTED,
                 )),
-                None => lines.push(("still running".to_owned(), palette::NOTE)),
+                None => lines.push((fl!("mark-still-running"), palette::NOTE)),
             }
             match outcome {
-                Outcome::Success => lines.push(("success".to_owned(), palette::MUTED)),
+                Outcome::Success => lines.push((fl!("outcome-success"), palette::MUTED)),
                 Outcome::Failed(result) => {
-                    lines.push((format!("failed: {result}"), palette::FAILED));
+                    lines.push((
+                        fl!("outcome-failed", result = result.as_str()),
+                        palette::FAILED,
+                    ));
                 }
                 Outcome::Running => {}
             }
@@ -922,61 +925,58 @@ fn describe(mark: &Mark, now: Timestamp, tz: &TimeZone) -> Vec<(String, Color)> 
             let when = scheduled.unwrap_or(*at);
             let mut lines = vec![
                 (
-                    format!("Planned · {}", label::moment(when, tz)),
+                    fl!("mark-planned", moment = label::moment(when, tz)),
                     palette::TEXT,
                 ),
                 (label::relative(when, now), palette::MUTED),
             ];
             if delay.is_positive() {
                 let text = match scheduled {
-                    Some(_) => format!(
-                        "calendar {}, +{} random delay",
-                        label::moment(*at, tz),
-                        timespan::format(when.duration_since(*at))
+                    Some(_) => fl!(
+                        "mark-random-picked",
+                        moment = label::moment(*at, tz),
+                        span = label::span(when.duration_since(*at))
                     ),
-                    None => format!(
-                        "randomly within {1} after {0}",
-                        label::moment(*at, tz),
-                        timespan::format(*delay)
+                    None => fl!(
+                        "mark-random-window",
+                        moment = label::moment(*at, tz),
+                        span = label::span(*delay)
                     ),
                 };
                 lines.push((text, palette::MUTED));
             }
             if *wakes {
-                lines.push(("wakes the machine from sleep".to_owned(), palette::MUTED));
+                lines.push((fl!("mark-wakes"), palette::MUTED));
             }
             lines
         }
         Mark::Ghost { at } => vec![
             (label::moment(*at, tz), palette::TEXT),
-            (
-                "timer inactive; it would fire here if enabled".to_owned(),
-                palette::MUTED,
-            ),
+            (fl!("mark-ghost"), palette::MUTED),
         ],
         Mark::Skipped { at, while_down } => vec![
             (
-                format!("Skipped · {}", label::moment(*at, tz)),
+                fl!("mark-skipped", moment = label::moment(*at, tz)),
                 palette::TEXT,
             ),
             (
                 if *while_down {
-                    "machine was down".to_owned()
+                    fl!("mark-skipped-down")
                 } else {
-                    "no run in the journal".to_owned()
+                    fl!("mark-skipped-no-run")
                 },
                 palette::MUTED,
             ),
         ],
         Mark::CatchUp { from, to } => vec![
-            ("Persistent catch-up".to_owned(), palette::CATCH_UP),
+            (fl!("mark-catch-up"), palette::CATCH_UP),
             (
                 format!("{} → {}", label::moment(*from, tz), label::moment(*to, tz)),
                 palette::MUTED,
             ),
         ],
         Mark::Tether { from, to } => vec![
-            ("Monotonic countdown".to_owned(), palette::TEXT),
+            (fl!("mark-tether"), palette::TEXT),
             (
                 format!("{} → {}", label::moment(*from, tz), label::moment(*to, tz)),
                 palette::MUTED,
@@ -987,11 +987,11 @@ fn describe(mark: &Mark, now: Timestamp, tz: &TimeZone) -> Vec<(String, Color)> 
 
 fn describe_downtime(down: &Downtime, tz: &TimeZone) -> Vec<(String, Color)> {
     let title = match down.kind {
-        DowntimeKind::PoweredOff => "Powered off",
-        DowntimeKind::Suspended => "Suspended",
+        DowntimeKind::PoweredOff => fl!("downtime-powered-off"),
+        DowntimeKind::Suspended => fl!("downtime-suspended"),
     };
     vec![
-        (title.to_owned(), palette::TEXT),
+        (title, palette::TEXT),
         (
             format!(
                 "{} → {}",
@@ -1065,17 +1065,17 @@ fn ellipsize(text: &str, width: f32, size: f32) -> String {
 fn draw_legend(frame: &mut Frame, top: f32) {
     type Glyph = fn(&mut Frame, Point);
 
-    let items: [(&str, Glyph); 8] = [
-        ("ran", |frame, at| {
+    let items: [(String, Glyph); 8] = [
+        (fl!("legend-ran"), |frame, at| {
             frame.fill(&Path::circle(at, 5.0), palette::NOTE)
         }),
-        ("failed", |frame, at| {
+        (fl!("legend-failed"), |frame, at| {
             frame.fill(&Path::circle(at, 5.0), palette::FAILED)
         }),
-        ("planned", |frame, at| {
+        (fl!("legend-planned"), |frame, at| {
             frame.fill(&Path::circle(at, 5.0), palette::NOTE.scale_alpha(0.55));
         }),
-        ("RandomizedDelaySec", |frame, at| {
+        (fl!("legend-delay"), |frame, at| {
             frame.fill(
                 &Path::rounded_rectangle(
                     Point::new(at.x - 9.0, at.y - 6.0),
@@ -1085,7 +1085,7 @@ fn draw_legend(frame: &mut Frame, top: f32) {
                 palette::NOTE.scale_alpha(0.25),
             );
         }),
-        ("WakeSystem", |frame, at| {
+        (fl!("legend-wake"), |frame, at| {
             frame.fill(&Path::circle(at, 5.0), palette::NOTE.scale_alpha(0.55));
             frame.stroke(
                 &Path::circle(at, 9.0),
@@ -1094,16 +1094,16 @@ fn draw_legend(frame: &mut Frame, top: f32) {
                     .with_width(1.5),
             );
         }),
-        ("skipped", |frame, at| {
+        (fl!("legend-skipped"), |frame, at| {
             frame.stroke(
                 &Path::circle(at, 5.0),
                 Stroke::default().with_color(palette::MUTED).with_width(1.5),
             );
         }),
-        ("Persistent catch-up", |frame, at| {
+        (fl!("legend-catch-up"), |frame, at| {
             draw_catch_up(frame, at.x - 10.0, at.x + 10.0, at.y + 8.0);
         }),
-        ("machine down", |frame, at| {
+        (fl!("legend-down"), |frame, at| {
             hatch(
                 frame,
                 Rectangle::new(Point::new(at.x - 10.0, at.y - 8.0), Size::new(22.0, 16.0)),
@@ -1116,14 +1116,14 @@ fn draw_legend(frame: &mut Frame, top: f32) {
     let mut x = PAD + 10.0;
     let mut y = top + 16.0;
     for (name, glyph) in items {
-        let item_width = 34.0 + text_width(name, 13.0) + 24.0;
+        let item_width = 34.0 + text_width(&name, 13.0) + 24.0;
         if x + item_width > width - PAD {
             x = PAD + 10.0;
             y += 28.0;
         }
         glyph(frame, Point::new(x, y));
         frame.fill_text(Text {
-            content: name.to_owned(),
+            content: name,
             position: Point::new(x + 20.0, y),
             color: palette::MUTED,
             size: 13.0.into(),

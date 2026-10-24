@@ -35,7 +35,28 @@ pub struct Snapshot {
     /// False when the journal could not be read; past occurrences then cannot
     /// be judged as skipped.
     pub history_known: bool,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<Warning>,
+}
+
+/// Something the snapshot could not fully show. Errors carry systemd's or
+/// the tool's own message, which stays untranslated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Warning {
+    OldSystemd {
+        version: u32,
+        minimum: u32,
+    },
+    /// systemd < 242 lists only the next calendar elapse.
+    NextElapseOnly,
+    /// systemd < 244 cannot list calendar elapses before now.
+    NoPastElapses,
+    MonotonicUnavailable(String),
+    HistoryUnavailable(String),
+    DowntimeUnavailable(String),
+    Unreadable {
+        unit: String,
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

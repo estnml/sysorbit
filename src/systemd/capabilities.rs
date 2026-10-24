@@ -6,6 +6,8 @@
 //! backport features and some builds disable them.
 
 use zbus::Connection;
+
+use crate::model::Warning;
 use zbus_systemd::systemd1::ManagerProxy;
 
 /// Oldest systemd the app is built for (RHEL 8).
@@ -54,18 +56,19 @@ impl Capabilities {
         self.at_least(251)
     }
 
-    /// Notices about missing features, worded for the user.
-    pub fn limitations(self) -> Vec<String> {
+    /// What this systemd cannot show.
+    pub fn limitations(self) -> Vec<Warning> {
         let mut notes = Vec::new();
         if let Some(version) = self.version.filter(|&v| v < MINIMUM_VERSION) {
-            notes.push(format!(
-                "systemd {version} is older than the supported {MINIMUM_VERSION}"
-            ));
+            notes.push(Warning::OldSystemd {
+                version,
+                minimum: MINIMUM_VERSION,
+            });
         }
         if !self.calendar_iterations() {
-            notes.push("only the next elapse is shown (systemd < 242)".to_owned());
+            notes.push(Warning::NextElapseOnly);
         } else if !self.calendar_base_time() {
-            notes.push("past elapses are not shown (systemd < 244)".to_owned());
+            notes.push(Warning::NoPastElapses);
         }
         notes
     }

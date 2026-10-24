@@ -23,6 +23,7 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
 use crate::host::Host;
+use crate::i18n::fl;
 use crate::model::{LogLine, Outcome, Scope, Snapshot};
 use crate::systemd;
 use crate::timeline::{self, Mark};
@@ -490,7 +491,10 @@ impl App {
             .map(|timer| {
                 let mut subtitle = label::schedule(timer);
                 if !timer.active {
-                    subtitle = format!("{} · {subtitle}", timer.unit_file_state);
+                    subtitle = format!(
+                        "{} · {subtitle}",
+                        label::unit_file_state(&timer.unit_file_state)
+                    );
                 }
                 Track {
                     title: timer.name().to_owned(),
@@ -520,8 +524,8 @@ impl App {
         let body: Element<'_, Message> = if self.tracks.is_empty() {
             let message = match (&self.error, self.loading) {
                 (Some(error), _) => error.clone(),
-                (None, true) => "Reading timers…".to_owned(),
-                (None, false) => "No timers in this scope.".to_owned(),
+                (None, true) => fl!("reading-timers"),
+                (None, false) => fl!("no-timers"),
             };
             container(text(message).color(palette::MUTED))
                 .center(Length::Fill)
@@ -617,7 +621,10 @@ impl App {
 
     fn header(&self) -> Element<'_, Message> {
         let scopes = controls::segmented(
-            [(Scope::System, "System"), (Scope::User, "User")],
+            [
+                (Scope::System, fl!("scope-system")),
+                (Scope::User, fl!("scope-user")),
+            ],
             self.scope,
             Message::SetScope,
         );
@@ -628,9 +635,9 @@ impl App {
         );
         let refresh = controls::action(
             if self.loading {
-                "Refreshing…"
+                fl!("refreshing")
             } else {
-                "Refresh"
+                fl!("refresh")
             },
             (!self.loading).then_some(Message::Refresh),
         );
@@ -660,33 +667,34 @@ impl App {
     fn status(&self) -> Element<'_, Message> {
         let mut parts = Vec::new();
         if let Some(snapshot) = &self.snapshot {
-            parts.push(format!(
-                "{} timers · updated {}",
-                snapshot.timers.len(),
-                label::clock(snapshot.fetched_at, &self.tz)
+            parts.push(fl!(
+                "status-timers",
+                count = snapshot.timers.len(),
+                time = label::clock(snapshot.fetched_at, &self.tz)
             ));
-            parts.extend(snapshot.warnings.iter().cloned());
+            parts.extend(snapshot.warnings.iter().map(label::warning));
         }
         if let (Some(error), false) = (&self.error, self.tracks.is_empty()) {
             parts.push(error.clone());
         }
 
         let (indicator, color) = match &self.live {
-            live::State::Live => ("● live".to_owned(), palette::CATCH_UP),
-            live::State::Connecting => ("○ connecting".to_owned(), palette::MUTED),
+            live::State::Live => (fl!("status-live"), palette::CATCH_UP),
+            live::State::Connecting => (fl!("status-connecting"), palette::MUTED),
             live::State::Lost(reason) => (
-                format!(
-                    "○ polling every {}s, live updates unavailable: {reason}",
-                    REFRESH.as_secs()
+                fl!(
+                    "status-polling",
+                    seconds = REFRESH.as_secs(),
+                    reason = reason.as_str()
                 ),
                 palette::NOTE,
             ),
         };
 
         let keys = if self.drawer.is_some() {
-            "←/→ marks · ↑/↓ timers · Enter logs · Esc back"
+            fl!("status-keys")
         } else {
-            ""
+            String::new()
         };
 
         row![

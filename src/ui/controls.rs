@@ -10,7 +10,7 @@ const RADIUS: f32 = 8.0;
 
 /// A framed group of choices where the current one is highlighted.
 pub fn segmented<'a, T, const N: usize>(
-    options: [(T, &'a str); N],
+    options: [(T, String); N],
     current: T,
     on_press: fn(T) -> Message,
 ) -> Element<'a, Message>
@@ -29,7 +29,7 @@ where
 }
 
 /// A single action in the same frame as the groups, e.g. Refresh.
-pub fn action<'a>(label: &'a str, on_press: Option<Message>) -> Element<'a, Message> {
+pub fn action<'a>(label: String, on_press: Option<Message>) -> Element<'a, Message> {
     frame(
         button(text(label).size(12))
             .padding([4, 12])

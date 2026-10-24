@@ -12,8 +12,8 @@ use super::label;
 use super::overview;
 use super::palette;
 use super::{Message, controls, musicbox};
+use crate::i18n::fl;
 use crate::model::{LogLine, Outcome, Run, Timer};
-use crate::systemd::timespan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tab {
@@ -91,9 +91,9 @@ pub fn view<'a>(
 ) -> Element<'a, Message> {
     let tabs = controls::segmented(
         [
-            (Tab::Overview, "Overview"),
-            (Tab::Runs, "Runs"),
-            (Tab::Logs, "Logs"),
+            (Tab::Overview, fl!("tab-overview")),
+            (Tab::Runs, fl!("tab-runs")),
+            (Tab::Logs, fl!("tab-logs")),
         ],
         drawer.tab,
         Message::SetTab,
@@ -138,7 +138,7 @@ pub fn view<'a>(
 
 fn runs<'a>(drawer: &'a Drawer, timer: &'a Timer, tz: &TimeZone) -> Element<'a, Message> {
     if timer.runs.is_empty() {
-        return muted("No runs in the loaded range.");
+        return muted(fl!("no-runs"));
     }
 
     let selected = drawer.selected_run(timer).map(|run| run.start);
@@ -156,7 +156,7 @@ fn runs<'a>(drawer: &'a Drawer, timer: &'a Timer, tz: &TimeZone) -> Element<'a, 
                 .size(13)
                 .color(color)
                 .width(Length::FillPortion(3)),
-            text("logs →").size(12).color(palette::MUTED),
+            text(fl!("run-logs-link")).size(12).color(palette::MUTED),
         ]
         .spacing(12);
 
@@ -175,25 +175,23 @@ fn runs<'a>(drawer: &'a Drawer, timer: &'a Timer, tz: &TimeZone) -> Element<'a, 
 
 fn logs<'a>(drawer: &'a Drawer, timer: &'a Timer, tz: &TimeZone) -> Element<'a, Message> {
     let Some(run) = drawer.selected_run(timer) else {
-        return muted("No runs in the loaded range.");
+        return muted(fl!("no-runs"));
     };
     let (result, color) = outcome(run);
     let header = row![
-        text(format!("Run · {}", label::moment(run.start, tz))).size(13),
+        text(fl!("run-heading", moment = label::moment(run.start, tz))).size(13),
         text(duration(run)).size(13).color(palette::MUTED),
         text(result).size(13).color(color),
     ]
     .spacing(12);
 
     let body: Element<'a, Message> = match (&drawer.logs, run.invocation.as_deref()) {
-        (_, None) => muted("systemd did not record an invocation ID for this run."),
-        (Logs::Failed { error, .. }, _) => text(format!("Could not read the logs: {error}"))
+        (_, None) => muted(fl!("no-invocation")),
+        (Logs::Failed { error, .. }, _) => text(fl!("logs-failed", error = error.as_str()))
             .size(13)
             .color(palette::FAILED)
             .into(),
-        (Logs::Loaded { lines, .. }, _) if lines.is_empty() => {
-            muted("This run wrote nothing to the journal.")
-        }
+        (Logs::Loaded { lines, .. }, _) if lines.is_empty() => muted(fl!("logs-empty")),
         (Logs::Loaded { lines, .. }, _) => {
             let rows = lines.iter().map(|line| log_line(line, tz));
             scrollable(Column::from_iter(rows).spacing(2))
@@ -202,7 +200,7 @@ fn logs<'a>(drawer: &'a Drawer, timer: &'a Timer, tz: &TimeZone) -> Element<'a, 
                 .width(Length::Fill)
                 .into()
         }
-        (Logs::None | Logs::Loading { .. }, _) => muted("Loading logs…"),
+        (Logs::None | Logs::Loading { .. }, _) => muted(fl!("logs-loading")),
     };
 
     column![header, body].spacing(10).into()
@@ -260,9 +258,12 @@ fn run_row(selected: bool, status: button::Status) -> button::Style {
 
 fn outcome(run: &Run) -> (String, iced::Color) {
     match &run.outcome {
-        Outcome::Success => ("success".to_owned(), palette::MUTED),
-        Outcome::Running => ("running".to_owned(), palette::NOTE),
-        Outcome::Failed(result) => (format!("failed: {result}"), palette::FAILED),
+        Outcome::Success => (fl!("outcome-success"), palette::MUTED),
+        Outcome::Running => (fl!("outcome-running"), palette::NOTE),
+        Outcome::Failed(result) => (
+            fl!("outcome-failed", result = result.as_str()),
+            palette::FAILED,
+        ),
     }
 }
 
@@ -270,12 +271,12 @@ fn duration(run: &Run) -> String {
     match (run.end, &run.outcome) {
         // An end equal to the start means systemd logged no end.
         (Some(end), outcome) if *outcome != Outcome::Running && end > run.start => {
-            timespan::format(end.duration_since(run.start))
+            label::span(end.duration_since(run.start))
         }
         _ => String::new(),
     }
 }
 
-fn muted(message: &str) -> Element<'_, Message> {
+fn muted<'a>(message: String) -> Element<'a, Message> {
     text(message).size(13).color(palette::MUTED).into()
 }

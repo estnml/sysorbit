@@ -5,16 +5,22 @@ edition = "2024"
 
 [dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester"] }
+i18n-embed-fl = "0.10"
 # Default renderers: wgpu first (high performance GPU preferred), tiny-skia
 # as the CPU fallback when no usable GPU is found.
 iced = { version = "0.14", features = ["canvas", "tokio"] }
+intl_pluralrules = "7"
 jiff = "0.2"
+rust-embed = "8"
 rustix = { version = "1", features = ["time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "net", "process", "sync", "time"] }
+unic-langid = "0.9"
 zbus = { version = "6", default-features = false, features = ["tokio"] }
 zbus_systemd = { version = "0.26201", features = ["systemd1", "zbus-async-tokio"] }
 
 [dev-dependencies]
+fluent-syntax = "0.12"
 tokio = { version = "1", features = ["rt", "macros"] }

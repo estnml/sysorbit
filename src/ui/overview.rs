@@ -6,12 +6,15 @@ use iced::alignment::Vertical;
 use iced::mouse;
 use iced::widget::canvas::{self, Canvas, Frame, Path, Stroke, Text};
 use iced::widget::text::Alignment;
-use iced::widget::{Column, Row, column, container, responsive, row, scrollable, text, tooltip};
+use iced::widget::{
+    Column, Row, column, container, mouse_area, responsive, row, scrollable, text, tooltip,
+};
 use iced::{Border, Color, Element, Font, Length, Point, Rectangle, Renderer, Size, Theme};
 use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
 
 use super::{Message, explain, label, musicbox, palette};
+use crate::i18n::{self, fl};
 use crate::model::{MonotonicBase, Outcome, Run, Timer};
 use crate::systemd::timespan;
 
@@ -45,38 +48,41 @@ pub fn identity(timer: &Timer) -> Element<'_, Message> {
     let service = hint(
         unit(&timer.service, timer.service_active),
         if timer.service_active {
-            "The service is running right now."
+            fl!("service-running")
         } else {
-            "The service is not running."
+            fl!("service-idle")
         },
     );
 
     let mut badges = vec![
+        if timer.active {
+            badge(
+                fl!("badge-active"),
+                "ActiveState=active",
+                fl!("help-active"),
+            )
+        } else {
+            badge(
+                fl!("badge-inactive"),
+                "ActiveState=inactive",
+                fl!("help-inactive"),
+            )
+        },
         badge(
-            if timer.active { "active" } else { "inactive" },
-            if timer.active {
-                "The timer is started and triggers its service when it elapses."
-            } else {
-                "The timer is stopped; it will not trigger until it is started."
-            },
-        ),
-        badge(
-            &timer.unit_file_state,
-            unit_file_help(&timer.unit_file_state),
+            label::unit_file_state(&timer.unit_file_state),
+            &format!("UnitFileState={}", timer.unit_file_state),
+            fl!("help-unit-file", state = timer.unit_file_state.as_str()),
         ),
     ];
     if timer.persistent {
         badges.push(badge(
-            "Persistent",
-            "Persistent=yes: an elapse missed while the machine was off or \
-             asleep runs right after it comes back.",
+            fl!("badge-persistent"),
+            "Persistent=yes",
+            fl!("help-persistent"),
         ));
     }
     if timer.wake_system {
-        badges.push(badge(
-            "WakeSystem",
-            "WakeSystem=yes: wakes the machine from suspend when the timer elapses.",
-        ));
+        badges.push(badge(fl!("badge-wake"), "WakeSystem=yes", fl!("help-wake")));
     }
 
     row![
@@ -103,11 +109,14 @@ pub fn view<'a>(
         // and the other cards sit under the grid.
         let grid_left = musicbox::grid_left(size.width + 2.0 * musicbox::PAD) - musicbox::PAD;
         let cards = row![
-            card("Schedule", schedule(timer, now, &tz))
+            card(fl!("card-schedule"), schedule(timer, now, &tz))
                 .width(Length::Fixed((grid_left - GAP).max(160.0))),
-            card("Next run", timing(timer, now, &tz)).width(Length::FillPortion(3)),
-            card("Recent runs", recent(timer, selected_run, now, &tz))
-                .width(Length::FillPortion(2)),
+            card(fl!("card-next-run"), timing(timer, now, &tz)).width(Length::FillPortion(3)),
+            card(
+                fl!("card-recent-runs"),
+                recent(timer, selected_run, now, &tz)
+            )
+            .width(Length::FillPortion(2)),
         ]
         .spacing(GAP)
         .height(Length::Fixed(CARD_HEIGHT));
@@ -120,8 +129,8 @@ pub fn view<'a>(
 /// Each trigger in systemd's notation, with its meaning behind an info icon.
 fn schedule<'a>(timer: &'a Timer, now: Timestamp, tz: &TimeZone) -> Element<'a, Message> {
     let calendar = timer.calendar.iter().map(|trigger| {
-        let meaning = explain::calendar(&trigger.expression)
-            .unwrap_or_else(|| "No plain form for this expression.".to_owned());
+        let meaning =
+            explain::calendar(&trigger.expression).unwrap_or_else(|| fl!("explain-unknown"));
         let upcoming: Vec<String> = trigger
             .occurrences
             .iter()
@@ -132,7 +141,7 @@ fn schedule<'a>(timer: &'a Timer, now: Timestamp, tz: &TimeZone) -> Element<'a, 
         let mut help = column![text(meaning).size(13)].spacing(4);
         if !upcoming.is_empty() {
             help = help.push(
-                text(format!("Next: {}", upcoming.join(", ")))
+                text(fl!("next-occurrences", moments = label::join(&upcoming)))
                     .size(12)
                     .color(palette::MUTED),
             );
@@ -157,7 +166,7 @@ fn schedule<'a>(timer: &'a Timer, now: Timestamp, tz: &TimeZone) -> Element<'a, 
 
     let rows: Vec<Element<'a, Message>> = calendar.chain(monotonic).collect();
     if rows.is_empty() {
-        return muted("No triggers.");
+        return muted(fl!("no-triggers"));
     }
     Column::from_vec(rows).spacing(8).into()
 }
@@ -195,38 +204,31 @@ fn timing<'a>(timer: &'a Timer, now: Timestamp, tz: &TimeZone) -> Element<'a, Me
     {
         notes.push(note(
             palette::NOTE,
-            format!("Running now, since {}.", label::clock(run.start, tz)),
+            fl!("running-since", time = label::clock(run.start, tz)),
         ));
     }
     if !timer.active {
-        notes.push(note(
-            palette::FAINT,
-            "The timer is inactive and will not fire until it is started.".to_owned(),
-        ));
+        notes.push(note(palette::FAINT, fl!("timer-inactive-note")));
     } else if timer.next_elapse.is_none() {
-        notes.push(note(
-            palette::FAINT,
-            "systemd has no upcoming elapse for this timer.".to_owned(),
-        ));
+        notes.push(note(palette::FAINT, fl!("no-upcoming")));
     }
     if timer.accuracy > DEFAULT_ACCURACY {
         notes.push(note(
             ACCURACY.scale_alpha(2.5),
-            format!(
-                "May run up to {} late (AccuracySec={}): systemd batches \
-                 wakeups inside this window.",
-                explain::span_words(timer.accuracy),
-                timespan::format(timer.accuracy)
+            fl!(
+                "accuracy-note",
+                span = label::span_words(timer.accuracy),
+                value = timespan::format(timer.accuracy)
             ),
         ));
     }
     if timer.randomized_delay.is_positive() {
         notes.push(note(
             DELAY.scale_alpha(2.5),
-            format!(
-                "Waits a random 0 to {} after each elapse (RandomizedDelaySec={}).",
-                explain::span_words(timer.randomized_delay),
-                timespan::format(timer.randomized_delay)
+            fl!(
+                "delay-note",
+                span = label::span_words(timer.randomized_delay),
+                value = timespan::format(timer.randomized_delay)
             ),
         ));
     }
@@ -244,7 +246,7 @@ fn recent<'a>(
     tz: &TimeZone,
 ) -> Element<'a, Message> {
     if timer.runs.is_empty() {
-        return muted("No runs in the loaded range.");
+        return muted(fl!("no-runs"));
     }
 
     let chart = Canvas::new(RunChart {
@@ -277,9 +279,9 @@ fn recent<'a>(
         .count();
 
     let mut stats = vec![
-        stat(format!("{succeeded} succeeded"), palette::MUTED),
+        stat(fl!("stat-succeeded", count = succeeded), palette::MUTED),
         stat(
-            format!("{failed} failed"),
+            fl!("stat-failed", count = failed),
             if failed > 0 {
                 palette::FAILED
             } else {
@@ -292,15 +294,15 @@ fn recent<'a>(
         let average = total / durations.len() as i32;
         let p95 = durations[(durations.len() * 95).div_ceil(100).saturating_sub(1)];
         stats.push(stat(
-            format!("avg {}", timespan::format(average)),
+            fl!("stat-average", span = label::span(average)),
             palette::MUTED,
         ));
         stats.push(stat(
-            format!("p95 {}", timespan::format(p95)),
+            fl!("stat-p95", span = label::span(p95)),
             palette::MUTED,
         ));
     } else if succeeded + failed > 0 {
-        stats.push(stat("durations not logged".to_owned(), palette::FAINT));
+        stats.push(stat(fl!("durations-not-logged"), palette::FAINT));
     }
 
     column![chart, Row::from_vec(stats).spacing(12)]
@@ -378,10 +380,10 @@ impl TimingBar<'_> {
             self.label(
                 frame,
                 Alignment::Left,
-                format!(
-                    "last {} · {}",
-                    label::moment(last, &self.tz),
-                    label::relative(last, now)
+                fl!(
+                    "bar-last",
+                    moment = label::moment(last, &self.tz),
+                    relative = label::relative(last, now)
                 ),
                 palette::TEXT,
             );
@@ -396,7 +398,7 @@ impl TimingBar<'_> {
             Stroke::default().with_color(palette::COMB).with_width(2.0),
         );
         frame.fill_text(Text {
-            content: format!("now {}", label::clock(now, &self.tz)),
+            content: fl!("now-clock", time = label::clock(now, &self.tz)),
             position: Point::new(now_x.clamp(30.0, width - 30.0), Self::BAR_Y + 21.0),
             color: palette::COMB,
             size: 11.0.into(),
@@ -421,10 +423,10 @@ impl TimingBar<'_> {
                 self.label(
                     frame,
                     Alignment::Right,
-                    format!(
-                        "next {} · {}",
-                        label::moment(next, &self.tz),
-                        label::relative(next, now)
+                    fl!(
+                        "bar-next",
+                        moment = label::moment(next, &self.tz),
+                        relative = label::relative(next, now)
                     ),
                     palette::TEXT,
                 );
@@ -432,7 +434,7 @@ impl TimingBar<'_> {
             None => self.label(
                 frame,
                 Alignment::Right,
-                "not scheduled".to_owned(),
+                fl!("bar-not-scheduled"),
                 palette::MUTED,
             ),
         }
@@ -609,24 +611,27 @@ impl canvas::Program<Message> for RunChart<'_> {
             match hovered.and_then(|start| self.runs.iter().find(|run| run.start == start)) {
                 Some(run) => {
                     let outcome = match &run.outcome {
-                        Outcome::Success => "success".to_owned(),
-                        Outcome::Running => "running".to_owned(),
-                        Outcome::Failed(result) => format!("failed: {result}"),
+                        Outcome::Success => fl!("outcome-success"),
+                        Outcome::Running => fl!("outcome-running"),
+                        Outcome::Failed(result) => {
+                            fl!("outcome-failed", result = result.as_str())
+                        }
                     };
                     (
-                        format!(
-                            "{} · {} · {outcome}",
-                            label::moment(run.start, &self.tz),
-                            duration_label(self.duration(run))
+                        fl!(
+                            "chart-run",
+                            moment = label::moment(run.start, &self.tz),
+                            span = duration_label(self.duration(run)),
+                            outcome = outcome
                         ),
                         palette::TEXT,
                     )
                 }
                 None => (
-                    format!(
-                        "last {} · longest {}",
-                        bars.len(),
-                        timespan::format(longest)
+                    fl!(
+                        "chart-summary",
+                        count = bars.len(),
+                        span = label::span(longest)
                     ),
                     palette::MUTED,
                 ),
@@ -660,35 +665,16 @@ impl canvas::Program<Message> for RunChart<'_> {
 /// `1.2s`, or a note when systemd logged no end for the run.
 fn duration_label(duration: SignedDuration) -> String {
     if duration.is_zero() {
-        "duration not logged".to_owned()
+        fl!("duration-not-logged")
     } else {
-        timespan::format(duration)
+        label::span(duration)
     }
 }
 
-fn unit_file_help(state: &str) -> &'static str {
-    match state {
-        "enabled" | "enabled-runtime" => {
-            "Enabled: started automatically at boot, or at login for user timers."
-        }
-        "disabled" => "Disabled: installed, but only runs when started by hand.",
-        "static" => {
-            "Static: has no [Install] section, so it cannot be enabled; another unit pulls it in."
-        }
-        "masked" | "masked-runtime" => "Masked: systemd refuses to start it.",
-        "transient" => "Transient: created at runtime, e.g. by systemd-run; gone after a reboot.",
-        "generated" => "Generated: created by a generator from other configuration.",
-        "indirect" => "Indirect: enabled through another unit's Also=.",
-        "linked" | "linked-runtime" => "Linked: the unit file lives outside the search path.",
-        "alias" => "Alias: another name for a different unit.",
-        _ => "The unit file state systemd reports.",
-    }
-}
-
-fn card<'a>(title: &'a str, body: Element<'a, Message>) -> container::Container<'a, Message> {
+fn card<'a>(title: String, body: Element<'a, Message>) -> container::Container<'a, Message> {
     container(
         column![
-            text(title.to_uppercase()).size(11).color(palette::MUTED),
+            text(i18n::uppercase(&title)).size(11).color(palette::MUTED),
             scrollable(body).height(Length::Fill)
         ]
         .spacing(10),
@@ -720,8 +706,10 @@ fn dot<'a>(color: Color) -> Element<'a, Message> {
         .into()
 }
 
-fn badge<'a>(name: &str, help: &'a str) -> Element<'a, Message> {
-    let pill = container(text(name.to_owned()).size(11).color(palette::MUTED))
+/// A pill with a word for the timer's state. Its card names the systemd
+/// property behind it, untranslated so it can be looked up, and explains it.
+fn badge<'a>(name: String, property: &str, help: String) -> Element<'a, Message> {
+    let pill = container(text(name).size(11).color(palette::MUTED))
         .padding([2, 8])
         .style(|_| container::Style {
             border: Border {
@@ -731,7 +719,19 @@ fn badge<'a>(name: &str, help: &'a str) -> Element<'a, Message> {
             },
             ..container::Style::default()
         });
-    hint(pill, help)
+    let card = column![
+        text(property.to_owned())
+            .size(11)
+            .font(Font::MONOSPACE)
+            .color(palette::MUTED),
+        text(help).size(12),
+    ]
+    .spacing(4);
+    // The help cursor tells that the pill explains itself.
+    tip(
+        mouse_area(pill).interaction(mouse::Interaction::Help),
+        card.into(),
+    )
 }
 
 fn info_icon<'a>() -> Element<'a, Message> {
@@ -751,7 +751,7 @@ fn info_icon<'a>() -> Element<'a, Message> {
         .into()
 }
 
-fn hint<'a>(content: impl Into<Element<'a, Message>>, help: &'a str) -> Element<'a, Message> {
+fn hint<'a>(content: impl Into<Element<'a, Message>>, help: String) -> Element<'a, Message> {
     tip(content, text(help).size(12).into())
 }
 
@@ -803,6 +803,6 @@ fn stat<'a>(content: String, color: Color) -> Element<'a, Message> {
     text(content).size(12).color(color).into()
 }
 
-fn muted(message: &str) -> Element<'_, Message> {
+fn muted<'a>(message: String) -> Element<'a, Message> {
     text(message).size(13).color(palette::MUTED).into()
 }
