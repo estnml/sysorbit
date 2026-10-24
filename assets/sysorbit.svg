@@ -1,9 +1,24 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-  <rect x="8" y="8" width="240" height="240" rx="54" fill="#1c1c1c"/>
-  <circle cx="128" cy="128" r="78" fill="none" stroke="#4fb3a9" stroke-width="12"/>
-  <circle cx="128" cy="128" r="50" fill="none" stroke="#555452" stroke-width="4"/>
-  <path d="M128 86v42l28 20" fill="none" stroke="#eceae6" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="128" cy="50" r="14" fill="#d08a2a"/>
-  <circle cx="196" cy="167" r="10" fill="#d08a2a"/>
-  <circle cx="60" cy="167" r="10" fill="#eceae6"/>
+  <!-- Tile in systemd's dark, with a faint edge for dark panels -->
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#201A26"/>
+  <rect x="9" y="9" width="238" height="238" rx="55" fill="none"
+        stroke="#FFFFFF" stroke-opacity="0.10" stroke-width="2"/>
+
+  <!-- Brackets around the whole note, as in systemd's [●◀] -->
+  <g fill="none" stroke="#B9B3C4" stroke-width="10"
+     stroke-linecap="square" stroke-linejoin="miter">
+    <path d="M58 52H40V204H58"/>
+    <path d="M198 52H216V204H198"/>
+  </g>
+
+  <!-- Two beamed notes: systemd's circle and left-pointing triangle as
+       heads on one line, centred on the tile -->
+  <g fill="#30D475" transform="translate(128 128) scale(1.2) translate(-126 -128)">
+    <!-- Stems and the beam joining them; the triangle's stem rises from its base -->
+    <path d="M98 162V94L180 78V162H174V95.17L104 108.83V162Z"/>
+    <!-- Circle head -->
+    <circle cx="88" cy="162" r="16"/>
+    <!-- Triangle head pointing left -->
+    <path d="M180 145L150 162L180 179Z"/>
+  </g>
 </svg>
