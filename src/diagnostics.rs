@@ -1,6 +1,5 @@
 //! The logging boundary accepts codes, counts and pseudonyms, never user text.
 
-use std::collections::VecDeque;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -20,7 +19,6 @@ const TARGET: &str = "sysorbit::diagnostics";
 const FILE_LIMIT: u64 = 1_400_000;
 const KEEP: usize = 7;
 static SALT: OnceLock<[u8; 32]> = OnceLock::new();
-static DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
 
 /// Only the digest is retained: formatting cannot reveal the original value.
 #[derive(Clone, Copy)]
@@ -125,7 +123,6 @@ pub enum Event {
     Refresh,
     PollRefresh,
     LiveRefresh,
-    CopyDiagnostics,
     CalendarSingleRetry,
     BootsTextFallback,
     ServiceInactiveFallback,
@@ -236,7 +233,6 @@ pub fn init() -> Option<WorkerGuard> {
     private_directory(&directory).ok()?;
     let salt = load_salt(&directory).ok()?;
     let _ = SALT.set(salt);
-    let _ = DIRECTORY.set(directory.clone());
     let writer = DailyWriter::new(directory);
     let (writer, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
         .buffered_lines_limit(512)
@@ -250,7 +246,9 @@ pub fn init() -> Option<WorkerGuard> {
         .with(layer(writer, filter))
         .try_init()
         .ok()?;
-    std::panic::set_hook(Box::new(|panic| {
+    // Chain to the previous hook so the panic message still reaches stderr.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
         let (file, line) = panic.location().map_or(("unknown", 0), |location| {
             // Dependency paths can include a username or a package cache path.
             let file = location.file().strip_prefix("src/").unwrap_or("dependency");
@@ -258,6 +256,7 @@ pub fn init() -> Option<WorkerGuard> {
         });
         tracing::error!(target: TARGET, event = "Panic", file, line,
             thread = ?std::thread::current().id());
+        previous(panic);
     }));
     event(Event::Start);
     tracing::info!(target: TARGET, version = env!("CARGO_PKG_VERSION"),
@@ -396,12 +395,12 @@ impl DailyWriter {
             let others: Vec<_> = files.into_iter().filter(|path| *path != current).collect();
             let excess = others.len().saturating_sub(KEEP - 1);
             for (index, path) in others.into_iter().enumerate() {
-                if index < excess || fs::metadata(&path)?.len() > FILE_LIMIT {
-                    fs::remove_file(path)?;
+                if index < excess || oversized(&path)? {
+                    remove_managed(&path)?;
                 }
             }
-            if fs::metadata(&current).is_ok_and(|metadata| metadata.len() > FILE_LIMIT) {
-                fs::remove_file(&current)?;
+            if oversized(&current)? {
+                remove_managed(&current)?;
             }
             let file = private_file(&current, false)?;
             self.size = file.metadata()?.len();
@@ -417,6 +416,23 @@ impl DailyWriter {
             }
         }
         Ok(())
+    }
+}
+
+// Another running instance may clean up the same file first; a file that is
+// already gone is not a failure.
+fn oversized(path: &Path) -> io::Result<bool> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len() > FILE_LIMIT),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn remove_managed(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
     }
 }
 
@@ -468,43 +484,6 @@ fn os_version() -> String {
     } else {
         version
     }
-}
-
-/// Called on a blocking worker by the clipboard action. Never read the salt.
-pub fn report(systemd: Option<u32>) -> String {
-    report_from(systemd, DIRECTORY.get().map(PathBuf::as_path))
-}
-
-fn report_from(systemd: Option<u32>, directory: Option<&Path>) -> String {
-    let mut report = format!(
-        "sysorbit {}\nOS: {} {} ({})\nsystemd: {}\n",
-        env!("CARGO_PKG_VERSION"),
-        std::env::consts::OS,
-        os_version(),
-        std::env::consts::ARCH,
-        systemd.map_or_else(|| "unknown".to_owned(), |v| v.to_string())
-    );
-    let mut lines = VecDeque::new();
-    if let Some(directory) = directory {
-        for file in log_files(directory).unwrap_or_default() {
-            if let Ok(file) = File::open(file) {
-                let mut content = String::new();
-                if file.take(FILE_LIMIT).read_to_string(&mut content).is_ok() {
-                    for line in content.lines() {
-                        lines.push_back(line.to_owned());
-                        if lines.len() > 200 {
-                            lines.pop_front();
-                        }
-                    }
-                }
-            }
-        }
-    }
-    for line in lines {
-        report.push_str(&line);
-        report.push('\n');
-    }
-    report
 }
 
 #[cfg(test)]
@@ -639,38 +618,21 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_report_includes_only_the_last_200_log_lines_and_no_salt() {
-        let directory = temporary_directory();
-        fs::write(directory.join("salt"), b"never-copy-this-installation-salt").unwrap();
-        let records: String = (0..240)
-            .map(|count| format!("INFO count={count}\n"))
-            .collect();
-        fs::write(directory.join("sysorbit-2000-01-01.log"), records).unwrap();
-        let report = report_from(Some(262), Some(&directory));
-        assert!(report.contains("systemd: 262"));
-        assert!(report.contains(concat!("sysorbit ", env!("CARGO_PKG_VERSION"))));
-        assert_eq!(
-            report
-                .lines()
-                .filter(|line| line.starts_with("INFO "))
-                .count(),
-            200
-        );
-        assert!(report.contains("INFO count=40\n"));
-        assert!(report.contains("INFO count=239\n"));
-        assert!(!report.contains("INFO count=39\n"));
-        assert!(!report.contains("never-copy-this-installation-salt"));
-        assert!(!report.contains(directory.to_str().unwrap()));
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
     fn failed_writer_silently_disables_itself() {
         let directory = temporary_directory();
         let mut writer = DailyWriter::new(directory.join("missing"));
         assert_eq!(writer.write(b"test\n").unwrap(), 5);
         assert!(writer.disabled);
         writer.write_all(b"still harmless\n").unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cleanup_tolerates_files_removed_by_another_instance() {
+        let directory = temporary_directory();
+        let gone = directory.join("sysorbit-2000-01-01.log");
+        assert!(!oversized(&gone).unwrap());
+        remove_managed(&gone).unwrap();
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -873,7 +835,6 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(snapshot.timers.len(), 1, "exercise the entire snapshot");
-            assert_eq!(snapshot.systemd_version, Some(262));
             crate::systemd::logs(&host, Scope::System, SECRET)
                 .await
                 .unwrap();

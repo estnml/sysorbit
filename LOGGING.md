@@ -2,10 +2,9 @@
 
 Sysorbit writes diagnostic files only on the local computer running the app,
 including when monitoring remote hosts over SSH. Logging adds no network
-requests, telemetry, crash reporting or uploads. Use **Copy diagnostics** in the
-status line to copy the app version, OS version, current scope's systemd version
-and the last 200 saved log lines. Reading these files runs on a background worker;
-the clipboard is changed only when you choose the action.
+requests, telemetry, crash reporting or uploads. For a bug report, attach the
+log files from the directory below; each run records the app version, OS version,
+architecture and the systemd version of every host it reaches.
 
 Files live in:
 
@@ -46,14 +45,14 @@ Host and unit identities must pass through `Redacted`. It holds only the first
 four bytes of HMAC-SHA256, formatted as `host#be8ec092` or `unit#12345678`. A
 random 32-byte key is stored in `salt` next to the files and reused across days
 and sessions. Host and unit hashes use separate domains. **Do not share the
-salt.** Copy diagnostics never reads it. Deleting it changes future pseudonyms;
+salt.** It is not a log file and never needs attaching. Deleting it changes future pseudonyms;
 short pseudonyms can collide.
 
 Hostnames, IPs, ports, destinations, aliases, usernames, SSH options and key
 paths, unit names/descriptions, calendar expressions, invocation IDs, journal
 messages, command output, D-Bus contents and raw error strings are never emitted.
 Errors displayed in the app retain their existing detail; the log receives only
-codes. Attach `.log` files or copied diagnostics to a report without editing
+codes. Attach `.log` files to a report without editing
 out personal data.
 
 ## Verbosity and format

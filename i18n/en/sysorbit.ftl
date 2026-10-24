@@ -384,4 +384,3 @@ explain-after-startup = { $span } after the service manager started (for user ti
 explain-after-unit-active = Every { $span }, counted from the last time the service started
 explain-after-unit-inactive = { $span } after the service last finished, again after every run
 
-copy-diagnostics = Copy diagnostics

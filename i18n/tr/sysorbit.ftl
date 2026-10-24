@@ -342,4 +342,3 @@ explain-after-startup = Servis yöneticisi başladıktan { $span } sonra (kullan
 explain-after-unit-active = Servis her başladıktan { $span } sonra yeniden
 explain-after-unit-inactive = Servis her bitişinden { $span } sonra
 
-copy-diagnostics = Tanılama bilgilerini kopyala

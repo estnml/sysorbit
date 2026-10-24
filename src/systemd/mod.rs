@@ -257,7 +257,6 @@ async fn snapshot_inner(
         0,
     );
     Ok(Snapshot {
-        systemd_version: capabilities.version,
         scope,
         fetched_at: Timestamp::now(),
         timers,

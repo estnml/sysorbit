@@ -84,8 +84,6 @@ pub enum Message {
     Tick,
     Refresh,
     Poll,
-    CopyDiagnostics,
-    DiagnosticsReady(String),
     /// A snapshot for the host connection of the given generation.
     Loaded(u64, Result<Arc<Snapshot>, String>),
     ToggleHostMenu,
@@ -333,22 +331,6 @@ impl App {
                 diagnostics::event(Event::PollRefresh);
                 self.load()
             }
-            Message::CopyDiagnostics => {
-                diagnostics::event(Event::CopyDiagnostics);
-                let version = self
-                    .snapshot
-                    .as_ref()
-                    .and_then(|snapshot| snapshot.systemd_version);
-                Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || diagnostics::report(version))
-                            .await
-                            .unwrap_or_default()
-                    },
-                    Message::DiagnosticsReady,
-                )
-            }
-            Message::DiagnosticsReady(report) => iced::clipboard::write(report),
             Message::Loaded(generation, _) if generation != self.generation => Task::none(),
             Message::Loaded(_, result) => {
                 self.loading = false;
@@ -1222,10 +1204,6 @@ impl App {
         }
         status
             .push(space::horizontal())
-            .push(controls::link(
-                fl!("copy-diagnostics"),
-                Message::CopyDiagnostics,
-            ))
             .push(text(keys).size(12).color(palette::FAINT))
             .spacing(12)
             .padding([0.0, musicbox::PAD])
@@ -1326,7 +1304,6 @@ mod tests {
 
     fn snapshot(timers: Vec<Timer>) -> Snapshot {
         Snapshot {
-            systemd_version: None,
             scope: Scope::System,
             fetched_at: Timestamp::from_second(1_800_000_000).unwrap(),
             timers,
