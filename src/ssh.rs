@@ -266,17 +266,13 @@ struct BridgeWriter {
 
 #[zbus::export::async_trait::async_trait]
 impl WriteHalf for BridgeWriter {
-    #[cfg(unix)]
+    // Declared like the trait, whose descriptor parameter exists on Unix
+    // only; an impl without it does not match on Windows.
     async fn sendmsg(
         &mut self,
         buffer: &[u8],
-        _fds: &[std::os::fd::BorrowedFd<'_>],
+        #[cfg(unix)] _fds: &[std::os::fd::BorrowedFd<'_>],
     ) -> io::Result<usize> {
-        self.stdin.write(buffer).await
-    }
-
-    #[cfg(not(unix))]
-    async fn sendmsg(&mut self, buffer: &[u8]) -> io::Result<usize> {
         self.stdin.write(buffer).await
     }
 
