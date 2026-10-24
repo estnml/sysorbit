@@ -119,11 +119,7 @@ pub fn unit_path(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
-    use crate::host::{Host, Invocation, LocalHost};
-    use crate::model::Scope;
 
     #[test]
     fn escapes_unit_names_like_systemd() {
@@ -143,9 +139,15 @@ mod tests {
 
     /// Starts a transient user timer and expects a notification. Run with
     /// `cargo test live_changes -- --ignored`.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     #[ignore = "needs a systemd user session"]
     async fn live_changes() {
+        use std::time::Duration;
+
+        use crate::host::{Host, Invocation, LocalHost};
+        use crate::model::Scope;
+
         let host = LocalHost::new();
         let bus = host.bus(Scope::User).await.expect("session bus");
         let mut changes = changes(&bus, &Watched::default()).await.expect("watch");

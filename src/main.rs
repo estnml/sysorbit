@@ -1,4 +1,5 @@
 mod host;
+mod hosts;
 mod i18n;
 mod model;
 mod ssh;
@@ -6,18 +7,19 @@ mod systemd;
 mod timeline;
 mod ui;
 
-use std::sync::Arc;
+use hosts::HostEntry;
+use ssh::Target;
 
-use host::{Host, LocalHost};
-use ssh::{SshHost, Target};
-
-/// `sysorbit` shows this machine's timers;
+/// `sysorbit` shows the host shown last time, else this machine's timers;
 /// `sysorbit [ssh://][user@]host[:port] [-o option]...` those of a Linux
-/// host reached over SSH, passing the `-o` options on to `ssh`.
+/// host reached over SSH, passing the `-o` options on to `ssh`. Either way
+/// the host menu offers every known host.
 fn main() -> iced::Result {
     i18n::init();
+    let (mut hosts, problems) = hosts::load();
+
     let mut args = std::env::args().skip(1);
-    let host: Arc<dyn Host> = match args.next() {
+    let selected = match args.next() {
         Some(destination) => {
             let mut target = Target::parse(&destination);
             while let Some(arg) = args.next() {
@@ -26,9 +28,13 @@ fn main() -> iced::Result {
                     _ => eprintln!("sysorbit: ignoring argument {arg}"),
                 }
             }
-            Arc::new(SshHost::new(target))
+            hosts.push(HostEntry::from_command_line(target));
+            Some(hosts.len() - 1)
         }
-        None => Arc::new(LocalHost::new()),
+        None => hosts::last_host()
+            .and_then(|id| hosts.iter().position(|host| host.id == id))
+            .or_else(|| (!hosts.is_empty()).then_some(0)),
     };
-    ui::run(host)
+
+    ui::run(hosts, selected, problems)
 }

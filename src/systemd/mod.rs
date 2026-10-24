@@ -191,7 +191,9 @@ mod tests {
     use zbus::Connection;
 
     use super::*;
-    use crate::host::{BoxFuture, LocalHost, Output};
+    #[cfg(target_os = "linux")]
+    use crate::host::LocalHost;
+    use crate::host::{BoxFuture, Output};
 
     /// A container from `tests/systemd-matrix/run.sh`: commands go through
     /// `docker exec`, D-Bus through the socket directory bind mounted on the
@@ -329,6 +331,7 @@ mod tests {
 
     /// Runs a transient user service and reads its logs back through its
     /// invocation ID. Run with `cargo test live_run_logs -- --ignored`.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     #[ignore = "needs a systemd user session"]
     async fn live_run_logs() {
@@ -367,6 +370,7 @@ mod tests {
 
     /// Reads the real timers of this machine. Run with
     /// `cargo test live_snapshot -- --ignored --nocapture`.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     #[ignore = "needs systemd on the test machine"]
     async fn live_snapshot() {

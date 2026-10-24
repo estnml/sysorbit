@@ -16,6 +16,11 @@ refresh = Refresh
 refreshing = Refreshing…
 reading-timers = Reading timers…
 no-timers = No timers in this scope.
+no-host = No host
+host-this-computer = this computer
+host-ssh-config = from ~/.ssh/config
+host-add-hint = Add servers in { $path }
+no-hosts = No servers yet. Add one in { $path }.
 status-timers = { $count ->
     [one] 1 timer
    *[other] { $count } timers

@@ -13,6 +13,7 @@ use iced::{Border, Color, Element, Font, Length, Point, Rectangle, Renderer, Siz
 use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
 
+use super::controls::dot;
 use super::{Message, explain, label, musicbox, palette};
 use crate::i18n::{self, fl};
 use crate::model::{MonotonicBase, Outcome, Run, Timer};
@@ -689,21 +690,6 @@ fn card<'a>(title: String, body: Element<'a, Message>) -> container::Container<'
         },
         ..container::Style::default()
     })
-}
-
-fn dot<'a>(color: Color) -> Element<'a, Message> {
-    container(text(""))
-        .width(8)
-        .height(8)
-        .style(move |_| container::Style {
-            background: Some(color.into()),
-            border: Border {
-                radius: 4.0.into(),
-                ..Border::default()
-            },
-            ..container::Style::default()
-        })
-        .into()
 }
 
 /// A pill with a word for the timer's state. Its card names the systemd

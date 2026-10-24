@@ -17,12 +17,16 @@ use std::time::Duration;
 use iced::keyboard::{self, key::Named};
 use iced::widget::canvas::{Cache, Canvas};
 use iced::widget::pane_grid::{self, PaneGrid};
-use iced::widget::{column, container, responsive, row, scrollable, space, stack, text};
+use iced::widget::{
+    Column, column, container, mouse_area, opaque, pin, responsive, row, scrollable, space, stack,
+    text,
+};
 use iced::{Element, Length, Subscription, Task, Theme};
 use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
 
 use crate::host::Host;
+use crate::hosts::{self, HostEntry, Origin};
 use crate::i18n::fl;
 use crate::model::{LogLine, Outcome, Scope, Snapshot};
 use crate::systemd;
@@ -31,26 +35,39 @@ use drawer::{Drawer, Logs, Tab};
 use musicbox::{Layer, MusicBox, Row as Track};
 use scale::Zoom;
 
+/// Where the header ends, measured from the window's top: the host menu
+/// opens below it.
+const HEADER_BOTTOM: f32 = 54.0;
+
 /// Polling interval without live updates.
 const REFRESH: Duration = Duration::from_secs(30);
 /// Safety net poll while live updates run, for anything signals miss.
 const REFRESH_LIVE: Duration = Duration::from_secs(300);
 
-pub fn run(host: Arc<dyn Host>) -> iced::Result {
-    iced::application(move || App::new(host.clone()), App::update, App::view)
-        .title(App::title)
-        .subscription(App::subscription)
-        .theme(App::theme)
-        .window_size((1280.0, 760.0))
-        .antialiasing(true)
-        .run()
+/// Runs the app showing `hosts[selected]`, or nothing when there are no
+/// hosts yet. `problems` are troubles reading the host files.
+pub fn run(hosts: Vec<HostEntry>, selected: Option<usize>, problems: Vec<String>) -> iced::Result {
+    iced::application(
+        move || App::new(hosts.clone(), selected, problems.clone()),
+        App::update,
+        App::view,
+    )
+    .title(App::title)
+    .subscription(App::subscription)
+    .theme(App::theme)
+    .window_size((1280.0, 760.0))
+    .antialiasing(true)
+    .run()
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Tick,
     Refresh,
-    Loaded(Result<Arc<Snapshot>, String>),
+    /// A snapshot for the host connection of the given generation.
+    Loaded(u64, Result<Arc<Snapshot>, String>),
+    ToggleHostMenu,
+    SelectHost(usize),
     SetZoom(Zoom),
     SetScope(Scope),
     /// A track was clicked.
@@ -91,7 +108,15 @@ enum Pane {
 }
 
 struct App {
-    host: Arc<dyn Host>,
+    hosts: Vec<HostEntry>,
+    /// Index of the host shown in `hosts`.
+    selected: Option<usize>,
+    host: Option<Arc<dyn Host>>,
+    /// Counts host switches, so a snapshot of the previous host that
+    /// arrives late is dropped.
+    generation: u64,
+    host_menu: bool,
+    host_problems: Vec<String>,
     scope: Scope,
     zoom: Zoom,
     /// The time zone times are shown in: the host's when it is remote and
@@ -115,9 +140,19 @@ struct App {
 }
 
 impl App {
-    fn new(host: Arc<dyn Host>) -> (Self, Task<Message>) {
+    fn new(
+        hosts: Vec<HostEntry>,
+        selected: Option<usize>,
+        host_problems: Vec<String>,
+    ) -> (Self, Task<Message>) {
+        let host = selected.map(|index| hosts[index].connect());
         let mut app = Self {
+            hosts,
+            selected,
             host,
+            generation: 0,
+            host_menu: false,
+            host_problems,
             scope: Scope::default(),
             zoom: Zoom::default(),
             tz: TimeZone::system(),
@@ -143,7 +178,10 @@ impl App {
     }
 
     fn title(&self) -> String {
-        format!("sysorbit · {}", self.host.name())
+        match self.entry() {
+            Some(entry) => format!("sysorbit · {}", entry.name),
+            None => "sysorbit".to_owned(),
+        }
     }
 
     fn theme(&self) -> Theme {
@@ -160,7 +198,8 @@ impl App {
             .snapshot
             .as_ref()
             .filter(|snapshot| snapshot.scope == self.scope)
-            .map(|snapshot| live::subscription(&self.host, snapshot))
+            .zip(self.host.as_ref())
+            .map(|(snapshot, host)| live::subscription(host, snapshot))
             .unwrap_or_else(Subscription::none);
 
         Subscription::batch([
@@ -177,6 +216,9 @@ impl App {
     }
 
     fn load(&mut self) -> Task<Message> {
+        let Some(host) = self.host.clone() else {
+            return Task::none();
+        };
         if self.loading {
             self.stale = true;
             return Task::none();
@@ -184,9 +226,9 @@ impl App {
         self.loading = true;
         self.stale = false;
 
-        let host = self.host.clone();
         let scope = self.scope;
         let window = self.zoom.fetch_window(self.host_now());
+        let generation = self.generation;
         Task::perform(
             async move {
                 systemd::snapshot(host.as_ref(), scope, window)
@@ -194,8 +236,39 @@ impl App {
                     .map(Arc::new)
                     .map_err(|error| error.to_string())
             },
-            Message::Loaded,
+            move |result| Message::Loaded(generation, result),
         )
+    }
+
+    fn entry(&self) -> Option<&HostEntry> {
+        self.selected.map(|index| &self.hosts[index])
+    }
+
+    /// Shows another host: a new connection, and nothing kept from the
+    /// previous host's timers, clock or selection.
+    fn select_host(&mut self, index: usize) -> Task<Message> {
+        self.host_menu = false;
+        if self.selected == Some(index) || index >= self.hosts.len() {
+            return Task::none();
+        }
+        let entry = &self.hosts[index];
+        if entry.origin != Origin::CommandLine {
+            hosts::remember(&entry.id);
+        }
+        self.host = Some(entry.connect());
+        self.selected = Some(index);
+        self.generation += 1;
+        self.snapshot = None;
+        self.tracks.clear();
+        self.drawer = None;
+        self.offset = SignedDuration::ZERO;
+        self.tz = TimeZone::system();
+        self.error = None;
+        self.live = live::State::default();
+        self.loading = false;
+        self.stale = false;
+        self.cache.clear();
+        self.load()
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -206,7 +279,8 @@ impl App {
                 Task::none()
             }
             Message::Refresh => self.load(),
-            Message::Loaded(result) => {
+            Message::Loaded(generation, _) if generation != self.generation => Task::none(),
+            Message::Loaded(_, result) => {
                 self.loading = false;
                 match result {
                     Ok(snapshot) => {
@@ -298,7 +372,16 @@ impl App {
                 self.cache.clear();
                 self.ensure_logs(false)
             }
+            Message::Navigate(Nav::Back) if self.host_menu => {
+                self.host_menu = false;
+                Task::none()
+            }
             Message::Navigate(nav) => self.navigate(nav),
+            Message::ToggleHostMenu => {
+                self.host_menu = !self.host_menu;
+                Task::none()
+            }
+            Message::SelectHost(index) => self.select_host(index),
             Message::SetTab(tab) => {
                 if let Some(drawer) = &mut self.drawer {
                     drawer.tab = tab;
@@ -487,7 +570,9 @@ impl App {
             };
         }
 
-        let host = self.host.clone();
+        let Some(host) = self.host.clone() else {
+            return Task::none();
+        };
         let scope = self.scope;
         Task::perform(
             async move {
@@ -547,6 +632,12 @@ impl App {
     fn view(&self) -> Element<'_, Message> {
         let body: Element<'_, Message> = if self.tracks.is_empty() {
             let message = match (&self.error, self.loading) {
+                _ if self.host.is_none() => fl!(
+                    "no-hosts",
+                    path = hosts::hosts_file()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default()
+                ),
                 (Some(error), _) => error.clone(),
                 (None, true) => fl!("reading-timers"),
                 (None, false) => fl!("no-timers"),
@@ -578,9 +669,100 @@ impl App {
             }
         };
 
-        column![self.header(), body, self.status()]
+        let content = column![self.header(), body, self.status()]
             .spacing(12)
-            .padding(16)
+            .padding(16);
+        if !self.host_menu {
+            return content.into();
+        }
+        // A click anywhere outside the menu closes it.
+        let backdrop = mouse_area(space::horizontal().width(Length::Fill).height(Length::Fill))
+            .on_press(Message::ToggleHostMenu);
+        stack![
+            content,
+            backdrop,
+            pin(opaque(self.host_menu()))
+                .x(16.0 + musicbox::PAD)
+                .y(HEADER_BOTTOM),
+        ]
+        .into()
+    }
+
+    /// The light on the host chip: how the connection to the shown host is.
+    fn connection_color(&self) -> iced::Color {
+        match (&self.live, &self.error, self.snapshot.is_some()) {
+            (_, Some(_), false) => palette::FAILED,
+            (live::State::Live, _, _) => palette::CATCH_UP,
+            (live::State::Lost(_), _, _) => palette::NOTE,
+            (live::State::Connecting, _, _) => palette::MUTED,
+        }
+    }
+
+    fn host_menu(&self) -> Element<'_, Message> {
+        let items = self.hosts.iter().enumerate().map(|(index, entry)| {
+            let current = self.selected == Some(index);
+            let detail = match (&entry.origin, &entry.kind) {
+                (Origin::ThisComputer, _) => fl!("host-this-computer"),
+                (Origin::SshConfig, _) => fl!("host-ssh-config"),
+                (_, hosts::HostKind::Ssh(target)) => target.to_string(),
+                (_, hosts::HostKind::Local) => String::new(),
+            };
+            let light = if current {
+                self.connection_color()
+            } else {
+                palette::FAINT
+            };
+            controls::menu_item(
+                row![
+                    controls::dot(light),
+                    column![
+                        text(entry.name.clone()).size(13),
+                        text(detail).size(11).color(palette::MUTED),
+                    ]
+                    .spacing(1),
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+                current,
+                Message::SelectHost(index),
+            )
+        });
+
+        let mut menu = Column::from_iter(items).spacing(2);
+        if let Some(path) = hosts::hosts_file() {
+            menu = menu.push(
+                container(
+                    text(fl!("host-add-hint", path = path.display().to_string()))
+                        .size(11)
+                        .color(palette::FAINT),
+                )
+                .padding([6, 10]),
+            );
+        }
+        for problem in &self.host_problems {
+            menu = menu.push(
+                container(text(problem.clone()).size(11).color(palette::FAILED)).padding([2, 10]),
+            );
+        }
+
+        container(scrollable(menu))
+            .width(340)
+            .max_height(420)
+            .padding(6)
+            .style(|_| container::Style {
+                background: Some(palette::SURFACE.into()),
+                border: iced::Border {
+                    color: palette::GRID_MAJOR,
+                    width: 1.0,
+                    radius: 10.0.into(),
+                },
+                shadow: iced::Shadow {
+                    color: iced::Color::BLACK.scale_alpha(0.5),
+                    offset: iced::Vector::new(0.0, 6.0),
+                    blur_radius: 18.0,
+                },
+                ..container::Style::default()
+            })
             .into()
     }
 
@@ -666,12 +848,23 @@ impl App {
             (!self.loading).then_some(Message::Refresh),
         );
 
-        let title = row![
-            text("sysorbit").size(22),
-            text(self.host.name()).size(14).color(palette::MUTED),
-        ]
-        .spacing(16)
-        .align_y(iced::Alignment::Center);
+        let host = controls::chip(
+            row![
+                controls::dot(self.connection_color()),
+                text(
+                    self.entry()
+                        .map_or_else(|| fl!("no-host"), |entry| entry.name.clone())
+                )
+                .size(13),
+                text("▾").size(11).color(palette::MUTED),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            Message::ToggleHostMenu,
+        );
+        let title = row![text("sysorbit").size(22), host]
+            .spacing(16)
+            .align_y(iced::Alignment::Center);
 
         // Only the controls wrap, so a fill spacer cannot push them down
         // while there is still room beside the title.

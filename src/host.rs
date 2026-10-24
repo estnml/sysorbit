@@ -8,6 +8,7 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 
+#[cfg(target_os = "linux")]
 use tokio::sync::OnceCell;
 use zbus::Connection;
 
@@ -88,29 +89,38 @@ pub trait Host: Send + Sync {
     }
 }
 
-/// Runs commands on this machine.
+/// This machine's hostname, e.g. `blade`.
+#[cfg(target_os = "linux")]
+pub fn local_hostname() -> String {
+    let uname = rustix::system::uname();
+    let name = uname.nodename().to_string_lossy();
+    if name.is_empty() {
+        "localhost".to_owned()
+    } else {
+        name.into_owned()
+    }
+}
+
+/// Runs commands on this machine. Only Linux has systemd to ask.
+#[cfg(target_os = "linux")]
 pub struct LocalHost {
     name: String,
     system_bus: OnceCell<Connection>,
     session_bus: OnceCell<Connection>,
 }
 
+#[cfg(target_os = "linux")]
 impl LocalHost {
     pub fn new() -> Self {
-        let name = std::fs::read_to_string("/etc/hostname")
-            .ok()
-            .map(|name| name.trim().to_owned())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "localhost".to_owned());
-
         Self {
-            name,
+            name: local_hostname(),
             system_bus: OnceCell::new(),
             session_bus: OnceCell::new(),
         }
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Host for LocalHost {
     fn name(&self) -> &str {
         &self.name

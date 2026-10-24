@@ -2,7 +2,7 @@
 //! in one framed group; the current one is lifted, the others stay quiet.
 
 use iced::widget::{Row, button, container, text};
-use iced::{Border, Element};
+use iced::{Border, Color, Element, Length};
 
 use super::{Message, palette};
 
@@ -44,6 +44,49 @@ pub fn icon<'a>(glyph: &'a str, on_press: Message) -> Element<'a, Message> {
         .padding([4, 9])
         .style(|_, status| segment(false, status))
         .on_press(on_press)
+        .into()
+}
+
+/// A framed button that opens something, like the host menu.
+pub fn chip<'a>(
+    content: impl Into<Element<'a, Message>>,
+    on_press: Message,
+) -> Element<'a, Message> {
+    frame(
+        button(content)
+            .padding([4, 10])
+            .style(|_, status| segment(false, status))
+            .on_press(on_press),
+    )
+}
+
+/// A full width row in a menu; the current one is lifted.
+pub fn menu_item<'a>(
+    content: impl Into<Element<'a, Message>>,
+    current: bool,
+    on_press: Message,
+) -> Element<'a, Message> {
+    button(content)
+        .width(Length::Fill)
+        .padding([6, 10])
+        .style(move |_, status| segment(current, status))
+        .on_press(on_press)
+        .into()
+}
+
+/// A small round status light.
+pub fn dot<'a>(color: Color) -> Element<'a, Message> {
+    container(text(""))
+        .width(8)
+        .height(8)
+        .style(move |_| container::Style {
+            background: Some(color.into()),
+            border: Border {
+                radius: 4.0.into(),
+                ..Border::default()
+            },
+            ..container::Style::default()
+        })
         .into()
 }
 
