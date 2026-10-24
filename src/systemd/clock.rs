@@ -16,7 +16,11 @@ use crate::model::HostClock;
 pub async fn read(host: &dyn Host, bus: &Connection) -> Result<HostClock, Error> {
     match timedated(bus).await {
         Ok(clock) => Ok(clock),
-        Err(_) => date(host).await,
+        Err(error) => {
+            crate::diagnostics::error(crate::diagnostics::bus_error(&error));
+            crate::diagnostics::event(crate::diagnostics::Event::ClockDateFallback);
+            date(host).await
+        }
     }
 }
 
@@ -43,8 +47,12 @@ async fn date(host: &dyn Host) -> Result<HostClock, Error> {
     let sent = Timestamp::now();
     let stdout = run(host, Invocation::new("date").arg("+%s%N")).await?;
     let received = Timestamp::now();
-    let nanos: i128 = stdout.trim().parse().map_err(Error::parse)?;
-    let at = Timestamp::from_nanosecond(nanos).map_err(Error::parse)?;
+    let nanos: i128 = stdout
+        .trim()
+        .parse()
+        .map_err(|error| Error::parse(crate::diagnostics::Parser::Clock, error))?;
+    let at = Timestamp::from_nanosecond(nanos)
+        .map_err(|error| Error::parse(crate::diagnostics::Parser::Clock, error))?;
     Ok(measure(at, sent, received, None))
 }
 

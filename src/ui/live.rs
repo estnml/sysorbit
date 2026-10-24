@@ -9,6 +9,7 @@ use iced::futures::{SinkExt, Stream, StreamExt};
 use tokio::time::{Instant, timeout_at};
 
 use super::Message;
+use crate::diagnostics::{self, Event as DiagnosticEvent, Phase, Redacted};
 use crate::host::Host;
 use crate::i18n::fl;
 use crate::model::{Scope, Snapshot};
@@ -78,6 +79,10 @@ fn events(watch: &Watch) -> impl Stream<Item = Event> + use<> {
     let watch = watch.clone();
     iced::stream::channel(8, async move |mut output| {
         loop {
+            diagnostics::host_event(
+                DiagnosticEvent::Reconnecting,
+                Redacted::host(watch.host.name()),
+            );
             let connected = async {
                 let bus = watch.host.bus(watch.scope).await?;
                 watch::changes(&bus, &watch.units).await
@@ -85,26 +90,32 @@ fn events(watch: &Watch) -> impl Stream<Item = Event> + use<> {
             let mut changes = match connected.await {
                 Ok(changes) => changes,
                 Err(error) => {
+                    diagnostics::event(DiagnosticEvent::Lost);
                     let _ = output.send(Event::Lost(error.to_string())).await;
                     tokio::time::sleep(RETRY).await;
                     continue;
                 }
             };
+            diagnostics::event(DiagnosticEvent::Connected);
             let _ = output.send(Event::Connected).await;
 
             while changes.next().await.is_some() {
                 // Trailing debounce: wait for a quiet moment, but not forever.
                 let deadline = Instant::now() + MAX_DELAY;
-                loop {
-                    let quiet = (Instant::now() + DEBOUNCE).min(deadline);
-                    match timeout_at(quiet, changes.next()).await {
-                        Ok(Some(())) => continue,
-                        Ok(None) | Err(_) => break,
+                diagnostics::measure(Phase::LiveDebounce, async {
+                    loop {
+                        let quiet = (Instant::now() + DEBOUNCE).min(deadline);
+                        match timeout_at(quiet, changes.next()).await {
+                            Ok(Some(())) => continue,
+                            Ok(None) | Err(_) => break,
+                        }
                     }
-                }
+                })
+                .await;
                 let _ = output.send(Event::Changed).await;
             }
 
+            diagnostics::event(DiagnosticEvent::Lost);
             let _ = output.send(Event::Lost(fl!("live-closed"))).await;
             tokio::time::sleep(RETRY).await;
         }

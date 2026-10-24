@@ -62,6 +62,9 @@ pub struct MusicBox<'a> {
     pub selected_run: Option<Timestamp>,
     /// Anchor of the keyboard focused mark on the selected track.
     pub focus: Option<Timestamp>,
+    /// Tracks lighting up because a run just started or failed, by index,
+    /// with the color at its current strength.
+    pub flashes: Vec<(usize, Color)>,
     pub cache: &'a Cache,
 }
 
@@ -368,6 +371,19 @@ impl MusicBox<'_> {
         }
     }
 
+    /// Tints the tracks whose service just started or failed. Drawn on the
+    /// overlay, so the fading needs no redraw of the cached content.
+    fn draw_flashes(&self, frame: &mut Frame) {
+        let grid = self.grid(frame.size());
+        for &(index, color) in &self.flashes {
+            frame.fill_rectangle(
+                Point::new(0.0, Self::row_center(index) - ROW / 2.0),
+                Size::new(grid.x + grid.width, ROW),
+                color,
+            );
+        }
+    }
+
     /// Rings the focused mark and, unless the mouse shows another tooltip,
     /// pins the mark's tooltip next to it.
     fn draw_focus(&self, frame: &mut Frame, with_tooltip: bool) {
@@ -482,15 +498,17 @@ impl canvas::Program<Message> for MusicBox<'_> {
         cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         match self.layer {
-            Layer::Content => vec![
-                self.cache
-                    .draw(renderer, bounds.size(), |frame| self.draw_content(frame)),
-            ],
+            Layer::Content => vec![self.cache.draw(renderer, bounds.size(), |frame| {
+                let _span =
+                    crate::diagnostics::span(crate::diagnostics::Phase::CanvasRebuild).entered();
+                self.draw_content(frame);
+            })],
             Layer::Overlay => {
                 let mut frame = Frame::new(renderer, bounds.size());
                 let hovering = cursor
                     .position_in(bounds)
                     .is_some_and(|position| self.draw_hover(&mut frame, position));
+                self.draw_flashes(&mut frame);
                 self.draw_focus(&mut frame, !hovering);
                 vec![frame.into_geometry()]
             }

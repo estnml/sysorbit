@@ -11,6 +11,7 @@ use jiff::{SignedDuration, Timestamp};
 use zbus::Connection;
 
 use super::Error;
+use crate::diagnostics::{self, ErrorCode, Event, Redacted};
 use crate::model::{CalendarTrigger, MonotonicBase, MonotonicTrigger, Timer, Warning};
 
 /// Loads every timer unit: installed unit files plus loaded instances.
@@ -49,10 +50,13 @@ pub async fn load(
     for (name, result) in names.iter().zip(results) {
         match result {
             Ok(timer) => timers.push(timer),
-            Err(error) => warnings.push(Warning::Unreadable {
-                unit: name.clone(),
-                error: error.to_string(),
-            }),
+            Err(error) => {
+                diagnostics::unit_error(Redacted::unit(name), ErrorCode::Bus);
+                warnings.push(Warning::Unreadable {
+                    unit: name.clone(),
+                    error: error.to_string(),
+                });
+            }
         }
     }
 
@@ -122,7 +126,10 @@ async fn load_timer(
                 .await?;
             matches!(state.as_str(), "active" | "activating" | "reloading")
         }
-        Err(_) => false,
+        Err(_) => {
+            diagnostics::event(Event::ServiceInactiveFallback);
+            false
+        }
     };
 
     Ok(Timer {

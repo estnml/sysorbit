@@ -266,6 +266,8 @@ pub fn calendar(expression: &str) -> String {
     let repeat = match time {
         "*:00" => Some(fl!("schedule-hourly")),
         "*:*" => Some(fl!("schedule-every-minute")),
+        // Other repeating times, like `*:07`, have no short form.
+        time if time.contains('*') => return expression.to_owned(),
         _ => None,
     };
 
@@ -308,6 +310,7 @@ mod tests {
         assert_eq!(calendar("Sat *-*-* *:00:00"), "Sat hourly");
         assert_eq!(calendar("*-*-01 00:00:00"), "*-*-01 00:00:00");
         assert_eq!(calendar("*-*-* *:0/15:00"), "*-*-* *:0/15:00");
+        assert_eq!(calendar("*-*-* *:07:00"), "*-*-* *:07:00");
     }
 
     #[test]

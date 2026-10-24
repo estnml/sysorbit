@@ -5,19 +5,25 @@ edition = "2024"
 
 [dependencies]
 directories = "6"
+getrandom = "0.3"
+hmac = "0.12"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester"] }
 i18n-embed-fl = "0.10"
-# Default renderers: wgpu first (high performance GPU preferred), tiny-skia
-# as the CPU fallback when no usable GPU is found.
 iced = { version = "0.14", features = ["canvas", "tokio"] }
 intl_pluralrules = "7"
 jiff = "0.2"
+rfd = "0.17"
 rust-embed = "8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "1"
+sha2 = "0.10"
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "sync", "time"] }
+toml = "1"
+toml_edit = "0.25"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unic-langid = "0.9"
 zbus = { version = "6", default-features = false, features = ["proxy", "tokio"] }
 
@@ -27,3 +33,4 @@ rustix = { version = "1", features = ["system", "time"] }
 [dev-dependencies]
 fluent-syntax = "0.12"
 tokio = { version = "1", features = ["rt", "macros"] }
+zbus = { version = "6", default-features = false, features = ["p2p", "service", "tokio"] }

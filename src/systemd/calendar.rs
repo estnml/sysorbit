@@ -35,6 +35,7 @@ pub async fn occurrences(
         Ok(parsed) => result.extend(parsed),
         // One bad expression fails the whole batch; retry one by one.
         Err(_) => {
+            crate::diagnostics::event(crate::diagnostics::Event::CalendarSingleRetry);
             for expression in expressions {
                 let single = std::slice::from_ref(expression);
                 if let Ok(parsed) = analyze(host, single, window, capabilities).await {

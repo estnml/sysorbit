@@ -79,10 +79,16 @@ pub struct History {
 }
 
 fn parse_entries(stdout: &str) -> Vec<Entry> {
-    stdout
+    let entries: Vec<Entry> = stdout
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
-        .collect()
+        .collect();
+    crate::diagnostics::parsed(
+        crate::diagnostics::Parser::Journal,
+        stdout.lines().count(),
+        entries.len(),
+    );
+    entries
 }
 
 fn journalctl(since: Timestamp) -> Invocation {
@@ -148,7 +154,7 @@ pub async fn history(
 /// Whether the journal hides other users' and the system's entries from
 /// this user. journalctl says so on stderr, though not with JSON output;
 /// asking for no lines gets just that notice.
-async fn system_hidden(host: &dyn Host) -> bool {
+pub(super) async fn system_hidden(host: &dyn Host) -> bool {
     let check = Invocation::new("journalctl").args(["--no-pager", "--lines=0"]);
     run_output(host, check)
         .await
@@ -402,7 +408,7 @@ pub async fn logs(host: &dyn Host, scope: Scope, invocation: &str) -> Result<Vec
     ]);
 
     let stdout = run(host, Invocation::new("journalctl").args(invocation_args)).await?;
-    Ok(stdout
+    let lines: Vec<LogLine> = stdout
         .lines()
         .filter_map(|line| serde_json::from_str::<Line>(line).ok())
         .filter_map(|line| {
@@ -417,7 +423,13 @@ pub async fn logs(host: &dyn Host, scope: Scope, invocation: &str) -> Result<Vec
                 message,
             })
         })
-        .collect())
+        .collect();
+    crate::diagnostics::parsed(
+        crate::diagnostics::Parser::JournalLogs,
+        stdout.lines().count(),
+        lines.len(),
+    );
+    Ok(lines)
 }
 
 /// The host's realtime clock minus its monotonic clock, taken from the
@@ -459,9 +471,10 @@ async fn boots(host: &dyn Host, capabilities: Capabilities) -> Result<Vec<Interv
 
     if capabilities.boots_json() {
         let json = run(host, list_boots().arg("--output=json")).await;
-        if let Ok(boots) =
-            json.and_then(|stdout| serde_json::from_str::<Vec<Boot>>(&stdout).map_err(Error::parse))
-        {
+        if let Ok(boots) = json.and_then(|stdout| {
+            serde_json::from_str::<Vec<Boot>>(&stdout)
+                .map_err(|error| Error::parse(crate::diagnostics::Parser::Boots, error))
+        }) {
             let mut boots: Vec<Interval> = boots
                 .into_iter()
                 .filter_map(|boot| {
@@ -476,6 +489,7 @@ async fn boots(host: &dyn Host, capabilities: Capabilities) -> Result<Vec<Interv
         }
     }
 
+    crate::diagnostics::event(crate::diagnostics::Event::BootsTextFallback);
     let text = run(host, list_boots().env("TZ", "UTC")).await?;
     Ok(parse_boots_text(&text))
 }

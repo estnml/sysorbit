@@ -11,10 +11,19 @@
 //! ```toml
 //! [[host]]
 //! name = "Prod web"
-//! destination = "admin@203.0.113.10"   # or a ~/.ssh/config alias
+//! destination = "203.0.113.10"   # or a ~/.ssh/config alias
+//! user = "admin"
 //! port = 22
-//! options = ["IdentityFile=~/keys/prod.pem"]
+//! key_file = "~/keys/prod.pem"   # leave out to use the agent and ~/.ssh/config
+//! options = ["ServerAliveInterval=30"]   # more `ssh -o` options
 //! ```
+//!
+//! The app writes the file when a host is added, edited or removed in its
+//! host dialog, editing it in place so that comments stay.
+//!
+//! Files in `hosts.d/` next to it use the same format and are only read:
+//! tools that set up hosts, like `tests/fleet/run.sh`, drop theirs there
+//! and remove them again without touching the user's own file.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -40,6 +49,8 @@ pub struct HostEntry {
     pub name: String,
     pub kind: HostKind,
     pub origin: Origin,
+    /// The entry in `hosts.toml`, for hosts saved there.
+    pub saved: Option<SavedHost>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +67,8 @@ pub enum Origin {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     ThisComputer,
     Saved,
+    /// A file in `hosts.d/`, owned by whatever wrote it.
+    DropIn,
     SshConfig,
     CommandLine,
 }
@@ -80,6 +93,7 @@ impl HostEntry {
             name: target.to_string(),
             kind: HostKind::Ssh(target),
             origin: Origin::CommandLine,
+            saved: None,
         }
     }
 }
@@ -96,6 +110,7 @@ pub fn load() -> (Vec<HostEntry>, Vec<String>) {
         name: crate::host::local_hostname(),
         kind: HostKind::Local,
         origin: Origin::ThisComputer,
+        saved: None,
     });
 
     if let Some(path) = hosts_file() {
@@ -106,6 +121,31 @@ pub fn load() -> (Vec<HostEntry>, Vec<String>) {
             },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => problems.push(format!("{}: {error}", path.display())),
+        }
+    }
+
+    if let Some(dir) = config_dir().map(|dir| dir.join("hosts.d")) {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| Some(entry.ok()?.path()))
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "toml")
+            })
+            .collect();
+        files.sort();
+        for path in files {
+            let parsed = std::fs::read_to_string(&path)
+                .map_err(|error| error.to_string())
+                .and_then(|text| parse_saved(&text).map_err(|error| error.to_string()));
+            match parsed {
+                Ok(dropped) => hosts.extend(dropped.into_iter().map(|entry| HostEntry {
+                    origin: Origin::DropIn,
+                    ..entry
+                })),
+                Err(error) => problems.push(format!("{}: {error}", path.display())),
+            }
         }
     }
 
@@ -122,6 +162,7 @@ pub fn load() -> (Vec<HostEntry>, Vec<String>) {
                     name: alias.clone(),
                     kind: HostKind::Ssh(Target::parse(&alias)),
                     origin: Origin::SshConfig,
+                    saved: None,
                 });
             }
         }
@@ -142,38 +183,205 @@ fn config_dir() -> Option<PathBuf> {
 #[derive(Debug, Default, Deserialize)]
 struct SavedFile {
     #[serde(default, rename = "host")]
-    hosts: Vec<Saved>,
+    hosts: Vec<SavedHost>,
 }
 
-#[derive(Debug, Deserialize)]
+/// A host as `hosts.toml` describes it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Saved {
-    id: Option<String>,
-    name: Option<String>,
-    destination: String,
-    port: Option<u16>,
+pub struct SavedHost {
+    /// Written by the app; a hand-written entry without one is known by
+    /// its address.
+    pub id: Option<String>,
+    pub name: Option<String>,
+    /// A hostname, an address or a `~/.ssh/config` alias, which may carry
+    /// `user@` and `:port` itself.
+    pub destination: String,
+    pub user: Option<String>,
+    pub port: Option<u16>,
+    /// A private key, e.g. a PEM file, used instead of the agent's keys.
+    pub key_file: Option<String>,
+    /// More `ssh -o` options.
     #[serde(default)]
-    options: Vec<String>,
+    pub options: Vec<String>,
+}
+
+impl SavedHost {
+    pub fn target(&self) -> Target {
+        let mut target = Target::parse(&self.destination);
+        if let Some(user) = self
+            .user
+            .as_ref()
+            .filter(|_| !target.destination.contains('@'))
+        {
+            target.destination = format!("{user}@{}", target.destination);
+        }
+        target.port = self.port.or(target.port);
+        target.options = self.options.clone();
+        if let Some(key) = &self.key_file {
+            // ssh expands a leading `~` in IdentityFile itself.
+            target.options.push(format!("IdentityFile={key}"));
+            target.options.push("IdentitiesOnly=yes".to_owned());
+        }
+        target
+    }
+
+    pub fn id(&self) -> String {
+        self.id
+            .clone()
+            .unwrap_or_else(|| format!("saved:{}", self.target()))
+    }
+
+    fn entry(self) -> HostEntry {
+        let target = self.target();
+        HostEntry {
+            id: self.id(),
+            name: self.name.clone().unwrap_or_else(|| target.to_string()),
+            kind: HostKind::Ssh(target),
+            origin: Origin::Saved,
+            saved: Some(self),
+        }
+    }
 }
 
 fn parse_saved(text: &str) -> Result<Vec<HostEntry>, toml::de::Error> {
     let file: SavedFile = toml::from_str(text)?;
-    Ok(file
-        .hosts
-        .into_iter()
-        .map(|saved| {
-            let mut target = Target::parse(&saved.destination);
-            target.port = saved.port.or(target.port);
-            target.options = saved.options;
-            let name = saved.name.unwrap_or_else(|| target.to_string());
-            HostEntry {
-                id: saved.id.unwrap_or_else(|| format!("saved:{}", target)),
-                name,
-                kind: HostKind::Ssh(target),
-                origin: Origin::Saved,
+    Ok(file.hosts.into_iter().map(SavedHost::entry).collect())
+}
+
+/// Writes `host` to `hosts.toml`, in place of the entry with id
+/// `replacing` if given, and returns its id.
+pub fn save(host: &SavedHost, replacing: Option<&str>) -> Result<String, String> {
+    let path = hosts_file().ok_or("no config directory")?;
+    save_in(&path, host, replacing)
+}
+
+/// Removes the entry with id `id` from `hosts.toml`.
+pub fn delete(id: &str) -> Result<(), String> {
+    let path = hosts_file().ok_or("no config directory")?;
+    delete_in(&path, id)
+}
+
+fn delete_in(path: &Path, id: &str) -> Result<(), String> {
+    edit_file(path, |hosts| {
+        if let Some(index) = position(hosts, id) {
+            hosts.remove(index);
+        }
+        Ok(())
+    })
+}
+
+fn save_in(path: &Path, host: &SavedHost, replacing: Option<&str>) -> Result<String, String> {
+    edit_file(path, |hosts| {
+        let index = replacing.and_then(|id| position(hosts, id));
+        let id = match (&host.id, replacing) {
+            (Some(id), _) => id.clone(),
+            (None, Some(id)) if index.is_some() => id.to_owned(),
+            (None, _) => unique_id(hosts, host.name.as_deref().unwrap_or(&host.destination)),
+        };
+        let table = match index {
+            Some(index) => hosts.get_mut(index).ok_or("entry vanished")?,
+            None => {
+                hosts.push(toml_edit::Table::new());
+                let last = hosts.len() - 1;
+                hosts.get_mut(last).ok_or("entry vanished")?
+            }
+        };
+        set(table, "id", Some(id.clone()));
+        set(table, "name", host.name.clone());
+        set(table, "destination", Some(host.destination.clone()));
+        set(table, "user", host.user.clone());
+        match host.port {
+            Some(port) => table["port"] = toml_edit::value(i64::from(port)),
+            None => {
+                table.remove("port");
+            }
+        }
+        set(table, "key_file", host.key_file.clone());
+        if host.options.is_empty() {
+            table.remove("options");
+        } else {
+            table["options"] = toml_edit::value(host.options.iter().collect::<toml_edit::Array>());
+        }
+        Ok(id)
+    })
+}
+
+/// Runs `change` on the `[[host]]` tables of the file at `path` and
+/// writes it back, keeping everything else, comments included.
+fn edit_file<T>(
+    path: &Path,
+    change: impl FnOnce(&mut toml_edit::ArrayOfTables) -> Result<T, String>,
+) -> Result<T, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut document: toml_edit::DocumentMut = text.parse().map_err(|error| format!("{error}"))?;
+    let hosts = document
+        .entry("host")
+        .or_insert(toml_edit::Item::ArrayOfTables(
+            toml_edit::ArrayOfTables::new(),
+        ))
+        .as_array_of_tables_mut()
+        .ok_or("`host` is not a list of [[host]] tables")?;
+    let result = change(hosts)?;
+
+    let dir = path.parent().ok_or("no config directory")?;
+    std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    // Written next to the file and renamed over it, so a crash never
+    // leaves half a file.
+    let temporary = path.with_extension("toml.new");
+    std::fs::write(&temporary, document.to_string()).map_err(|error| error.to_string())?;
+    std::fs::rename(&temporary, path).map_err(|error| error.to_string())?;
+    Ok(result)
+}
+
+/// The index of the table whose entry has id `id`.
+fn position(hosts: &toml_edit::ArrayOfTables, id: &str) -> Option<usize> {
+    hosts.iter().position(|table| {
+        toml::from_str::<SavedHost>(&table.to_string()).is_ok_and(|host| host.id() == id)
+    })
+}
+
+/// An id made from `name`, e.g. `prod-web`, that no entry has yet.
+fn unique_id(hosts: &toml_edit::ArrayOfTables, name: &str) -> String {
+    let slug: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let base = if slug.is_empty() {
+        "host".to_owned()
+    } else {
+        slug
+    };
+    (1..)
+        .map(|n| {
+            if n == 1 {
+                base.clone()
+            } else {
+                format!("{base}-{n}")
             }
         })
-        .collect())
+        .find(|id| position(hosts, id).is_none())
+        .unwrap_or(base)
+}
+
+/// Sets `key` to `value`, or removes it for `None`; a value already there
+/// keeps the comments around it.
+fn set(table: &mut toml_edit::Table, key: &str, value: Option<String>) {
+    match value {
+        Some(value) => table[key] = toml_edit::value(value),
+        None => {
+            table.remove(key);
+        }
+    }
 }
 
 /// Concrete `Host` names in an ssh config; patterns with `*`, `?` or `!`
@@ -273,5 +481,72 @@ Match host foo
         assert_eq!(target.options, ["IdentityFile=~/keys/prod.pem"]);
         assert_eq!(hosts[1].name, "staging:2200");
         assert!(parse_saved("[[host]]\nname = \"no destination\"").is_err());
+    }
+
+    /// A file of its own in the temp directory, removed when dropped.
+    struct TempFile(PathBuf);
+
+    impl TempFile {
+        fn new(name: &str, text: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("sysorbit-{}-{name}.toml", std::process::id()));
+            std::fs::write(&path, text).expect("write temp file");
+            Self(path)
+        }
+
+        fn read(&self) -> String {
+            std::fs::read_to_string(&self.0).expect("read temp file")
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn saving_keeps_comments_and_other_hosts() {
+        let file = TempFile::new(
+            "save",
+            "# My servers\n\n[[host]]\n# the old box\nname = \"Old\"\ndestination = \"old\"\n",
+        );
+        let new = SavedHost {
+            name: Some("Prod web".to_owned()),
+            destination: "203.0.113.10".to_owned(),
+            user: Some("admin".to_owned()),
+            key_file: Some("~/keys/prod.pem".to_owned()),
+            ..SavedHost::default()
+        };
+        let id = save_in(&file.0, &new, None).expect("save new");
+        assert_eq!(id, "prod-web");
+
+        // Edit the hand-written entry, known by its address.
+        let old = SavedHost {
+            name: Some("Old box".to_owned()),
+            destination: "old".to_owned(),
+            port: Some(2200),
+            ..SavedHost::default()
+        };
+        save_in(&file.0, &old, Some("saved:old")).expect("save edit");
+
+        let text = file.read();
+        assert!(text.starts_with("# My servers"), "{text}");
+        assert!(text.contains("# the old box\nname = \"Old box\""), "{text}");
+        let hosts = parse_saved(&text).expect("valid file");
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].id, "saved:old");
+        let HostKind::Ssh(target) = &hosts[1].kind else {
+            panic!("ssh host")
+        };
+        assert_eq!(target.destination, "admin@203.0.113.10");
+        assert!(
+            target
+                .options
+                .contains(&"IdentityFile=~/keys/prod.pem".to_owned())
+        );
+
+        delete_in(&file.0, "prod-web").expect("delete");
+        assert_eq!(parse_saved(&file.read()).expect("valid file").len(), 1);
     }
 }

@@ -17,6 +17,7 @@ use zbus::Connection;
 use zbus::conn::AuthMechanism;
 use zbus::connection::socket::{ReadHalf, Socket, Split, WriteHalf};
 
+use crate::diagnostics::{self, Phase};
 use crate::host::{BoxFuture, Host, Invocation, Output};
 use crate::model::Scope;
 
@@ -105,6 +106,10 @@ impl SshHost {
     }
 
     async fn connect(&self, scope: Scope) -> zbus::Result<Connection> {
+        diagnostics::measure(Phase::SshConnect, self.connect_inner(scope)).await
+    }
+
+    async fn connect_inner(&self, scope: Scope) -> zbus::Result<Connection> {
         let bridge = match scope {
             Scope::System => "systemd-stdio-bridge".to_owned(),
             // `--user` only exists since systemd 248; the bus path works on
@@ -180,7 +185,9 @@ impl Host for SshHost {
             line.push(quote(&invocation.program));
             line.extend(invocation.args.iter().map(|arg| quote(arg)));
 
-            let output = self.ssh().arg(line.join(" ")).output().await?;
+            let output =
+                diagnostics::measure(Phase::SshCommand, self.ssh().arg(line.join(" ")).output())
+                    .await?;
             Ok(Output {
                 success: output.status.success(),
                 stdout: String::from_utf8_lossy(&output.stdout).into_owned(),

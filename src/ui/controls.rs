@@ -47,6 +47,25 @@ pub fn icon<'a>(glyph: &'a str, on_press: Message) -> Element<'a, Message> {
         .into()
 }
 
+/// The button that confirms, like Save: lifted like a current choice.
+pub fn primary<'a>(label: String, on_press: Message) -> Element<'a, Message> {
+    frame(
+        button(text(label).size(12))
+            .padding([4, 12])
+            .style(|_, status| segment(true, status))
+            .on_press(on_press),
+    )
+}
+
+/// A quiet text button, like Edit beside a menu row.
+pub fn link<'a>(label: String, on_press: Message) -> Element<'a, Message> {
+    button(text(label).size(11))
+        .padding([2, 6])
+        .style(|_, status| segment(false, status))
+        .on_press(on_press)
+        .into()
+}
+
 /// A framed button that opens something, like the host menu.
 pub fn chip<'a>(
     content: impl Into<Element<'a, Message>>,

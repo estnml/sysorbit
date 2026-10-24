@@ -1,3 +1,4 @@
+mod diagnostics;
 mod host;
 mod hosts;
 mod i18n;
@@ -16,6 +17,7 @@ use ssh::Target;
 /// the host menu offers every known host.
 fn main() -> iced::Result {
     i18n::init();
+    let _logging = diagnostics::init();
     let (mut hosts, problems) = hosts::load();
 
     let mut args = std::env::args().skip(1);
@@ -36,5 +38,7 @@ fn main() -> iced::Result {
             .or_else(|| (!hosts.is_empty()).then_some(0)),
     };
 
-    ui::run(hosts, selected, problems)
+    let result = ui::run(hosts, selected, problems);
+    diagnostics::event(diagnostics::Event::Exit);
+    result
 }

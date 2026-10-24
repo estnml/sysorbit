@@ -28,6 +28,7 @@ impl Interval {
 
 #[derive(Debug, Clone)]
 pub struct Snapshot {
+    pub systemd_version: Option<u32>,
     pub scope: Scope,
     pub fetched_at: Timestamp,
     pub timers: Vec<Timer>,

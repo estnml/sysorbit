@@ -16,6 +16,7 @@ use jiff::Timestamp;
 
 pub use capabilities::Capabilities;
 
+use crate::diagnostics::{self, ErrorCode, Phase, Redacted};
 use crate::host::{Host, Invocation};
 use crate::model::{Interval, Scope, Snapshot, Warning};
 
@@ -38,12 +39,14 @@ pub enum Error {
 
 impl From<zbus::Error> for Error {
     fn from(error: zbus::Error) -> Self {
+        diagnostics::error(diagnostics::bus_error(&error));
         Self::Bus(error.to_string())
     }
 }
 
 impl Error {
-    fn parse(error: impl fmt::Display) -> Self {
+    fn parse(parser: diagnostics::Parser, error: impl fmt::Display) -> Self {
+        diagnostics::parse_error(parser);
         Self::Parse(error.to_string())
     }
 }
@@ -69,14 +72,21 @@ async fn run(host: &dyn Host, invocation: Invocation) -> Result<String, Error> {
 
 /// Like [`run`], keeping stderr for callers that read warnings from it.
 async fn run_output(host: &dyn Host, invocation: Invocation) -> Result<crate::host::Output, Error> {
-    let output = host.run(&invocation).await.map_err(|error| Error::Spawn {
-        command: invocation.to_string(),
-        reason: error.to_string(),
-    })?;
+    let output = diagnostics::measure(Phase::Command, host.run(&invocation))
+        .await
+        .map_err(|error| {
+            diagnostics::error(ErrorCode::Spawn);
+            Error::Spawn {
+                command: invocation.to_string(),
+                reason: error.to_string(),
+            }
+        })?;
+    diagnostics::command_output(output.stdout.len() + output.stderr.len(), output.success);
 
     if output.success {
         Ok(output)
     } else {
+        diagnostics::error(ErrorCode::Command);
         Err(Error::Command {
             command: invocation.to_string(),
             stderr: output.stderr.trim().to_owned(),
@@ -90,33 +100,89 @@ pub async fn logs(
     scope: Scope,
     invocation: &str,
 ) -> Result<Vec<crate::model::LogLine>, Error> {
-    journal::logs(host, scope, invocation).await
+    let result =
+        diagnostics::measure(Phase::LogLoading, journal::logs(host, scope, invocation)).await;
+    if let Ok(lines) = &result {
+        diagnostics::counts(0, 0, 0, lines.len());
+    }
+    result
+}
+
+/// What testing a connection found out.
+#[derive(Debug, Clone)]
+pub struct Probe {
+    pub version: Option<u32>,
+    /// Whether the journal shows the system's entries to this user.
+    pub journal_readable: bool,
+    pub clock: Option<crate::model::HostClock>,
+}
+
+/// Connects to the host's system bus and checks what sysorbit needs:
+/// systemd's version, access to the journal, and the host's clock.
+pub async fn probe(host: &dyn Host) -> Result<Probe, Error> {
+    diagnostics::measure_host(Phase::Probe, Redacted::host(host.name()), probe_inner(host)).await
+}
+
+async fn probe_inner(host: &dyn Host) -> Result<Probe, Error> {
+    let bus = diagnostics::measure(Phase::BusConnect, host.bus(Scope::System)).await?;
+    let (capabilities, clock, hidden) = tokio::join!(
+        diagnostics::measure(Phase::Capabilities, Capabilities::detect(&bus)),
+        diagnostics::measure(Phase::Clock, clock::read(host, &bus)),
+        journal::system_hidden(host)
+    );
+    diagnostics::capabilities(Redacted::host(host.name()), capabilities);
+    Ok(Probe {
+        version: capabilities.version,
+        journal_readable: !hidden,
+        clock: clock.ok(),
+    })
 }
 
 /// Collects everything the UI needs for `window` in one pass.
 pub async fn snapshot(host: &dyn Host, scope: Scope, window: Interval) -> Result<Snapshot, Error> {
+    diagnostics::measure_host(
+        Phase::Snapshot,
+        Redacted::host(host.name()),
+        snapshot_inner(host, scope, window),
+    )
+    .await
+}
+
+async fn snapshot_inner(
+    host: &dyn Host,
+    scope: Scope,
+    window: Interval,
+) -> Result<Snapshot, Error> {
     let mut warnings = Vec::new();
-    let (bus, clock_offset) = tokio::join!(host.bus(scope), journal::clock_offset(host));
+    let (bus, clock_offset) = tokio::join!(
+        diagnostics::measure(Phase::BusConnect, host.bus(scope)),
+        diagnostics::measure(Phase::ClockOffset, journal::clock_offset(host))
+    );
     let clock_offset = clock_offset.unwrap_or_else(|error| {
         warnings.push(Warning::MonotonicUnavailable(error.to_string()));
         None
     });
     let bus = bus?;
-    let (capabilities, clock) = tokio::join!(Capabilities::detect(&bus), async {
-        // This machine's own clock needs no comparing.
-        if host.is_local() {
-            None
-        } else {
-            Some(clock::read(host, &bus).await)
-        }
-    });
+    let (capabilities, clock) = tokio::join!(
+        diagnostics::measure(Phase::Capabilities, Capabilities::detect(&bus)),
+        diagnostics::measure(Phase::Clock, async {
+            // This machine's own clock needs no comparing.
+            if host.is_local() {
+                None
+            } else {
+                Some(clock::read(host, &bus).await)
+            }
+        })
+    );
+    diagnostics::capabilities(Redacted::host(host.name()), capabilities);
     let clock = clock.and_then(|clock| {
         clock
             .inspect_err(|error| warnings.push(Warning::ClockUnavailable(error.to_string())))
             .ok()
     });
     warnings.extend(capabilities.limitations());
-    let (mut timers, unit_warnings) = units::load(&bus, clock_offset).await?;
+    let (mut timers, unit_warnings) =
+        diagnostics::measure(Phase::Units, units::load(&bus, clock_offset)).await?;
     warnings.extend(unit_warnings);
 
     let mut expressions: Vec<String> = timers
@@ -137,15 +203,27 @@ pub async fn snapshot(host: &dyn Host, scope: Scope, window: Interval) -> Result
         .collect();
 
     let (occurrences, history, downtime) = tokio::join!(
-        calendar::occurrences(host, &expressions, window, capabilities),
-        journal::history(host, scope, &units, window.start),
-        journal::downtime(host, window, capabilities)
+        diagnostics::measure(
+            Phase::Calendar,
+            calendar::occurrences(host, &expressions, window, capabilities)
+        ),
+        diagnostics::measure(
+            Phase::JournalHistory,
+            journal::history(host, scope, &units, window.start)
+        ),
+        diagnostics::measure(
+            Phase::Downtime,
+            journal::downtime(host, window, capabilities)
+        )
     );
 
     let history_known = history.is_ok();
     let mut history = history.unwrap_or_else(|error| {
         warnings.push(match error {
-            Error::JournalRestricted => Warning::JournalRestricted,
+            Error::JournalRestricted => {
+                diagnostics::error(ErrorCode::JournalRestricted);
+                Warning::JournalRestricted
+            }
             error => Warning::HistoryUnavailable(error.to_string()),
         });
         journal::History::default()
@@ -172,7 +250,14 @@ pub async fn snapshot(host: &dyn Host, scope: Scope, window: Interval) -> Result
         }
     }
 
+    diagnostics::counts(
+        timers.len(),
+        timers.iter().map(|timer| timer.runs.len()).sum(),
+        0,
+        0,
+    );
     Ok(Snapshot {
+        systemd_version: capabilities.version,
         scope,
         fetched_at: Timestamp::now(),
         timers,

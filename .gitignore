@@ -1,1 +1,15 @@
 /target
+
+# Local notes, backups and development environment
+/TODO.md
+/DIAGNOSTICS_REPORT.md
+/.local-only/
+/.agents/
+/.codex/
+/.aws/
+/.env
+/.env.*
+/hosts.toml
+/hosts.d/
+/state.toml
+*.log

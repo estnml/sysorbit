@@ -22,10 +22,23 @@ pub struct Capabilities {
 impl Capabilities {
     pub async fn detect(bus: &Connection) -> Self {
         let version = match ManagerProxy::new(bus).await {
-            Ok(manager) => manager.version().await.ok(),
-            Err(_) => None,
+            Ok(manager) => manager
+                .version()
+                .await
+                .inspect_err(|error| {
+                    crate::diagnostics::error(crate::diagnostics::bus_error(error));
+                })
+                .ok(),
+            Err(error) => {
+                crate::diagnostics::error(crate::diagnostics::bus_error(&error));
+                None
+            }
         };
-        Self::from_version(version.as_deref().unwrap_or_default())
+        let capabilities = Self::from_version(version.as_deref().unwrap_or_default());
+        if capabilities.version.is_none() && version.is_some() {
+            crate::diagnostics::parse_error(crate::diagnostics::Parser::Capabilities);
+        }
+        capabilities
     }
 
     /// Parses `Manager.Version`, e.g. `262.1-1-arch`, `249.11-0ubuntu3.12` or

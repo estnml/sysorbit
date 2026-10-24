@@ -4,6 +4,7 @@ mod clock;
 mod controls;
 mod drawer;
 mod explain;
+mod host_form;
 mod label;
 mod live;
 mod musicbox;
@@ -11,29 +12,39 @@ mod overview;
 mod palette;
 mod scale;
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iced::keyboard::{self, key::Named};
 use iced::widget::canvas::{Cache, Canvas};
 use iced::widget::pane_grid::{self, PaneGrid};
 use iced::widget::{
-    Column, column, container, mouse_area, opaque, pin, responsive, row, scrollable, space, stack,
-    text,
+    Column, center, column, container, mouse_area, opaque, pin, responsive, row, scrollable, space,
+    stack, text,
 };
 use iced::{Element, Length, Subscription, Task, Theme};
 use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
 
+use crate::diagnostics::{self, Event, Phase, Redacted};
 use crate::host::Host;
 use crate::hosts::{self, HostEntry, Origin};
 use crate::i18n::fl;
 use crate::model::{LogLine, Outcome, Scope, Snapshot};
+use crate::ssh::SshHost;
 use crate::systemd;
 use crate::timeline::{self, Mark};
 use drawer::{Drawer, Logs, Tab};
+use host_form::{Field, FormMessage, HostForm, Test};
 use musicbox::{Layer, MusicBox, Row as Track};
 use scale::Zoom;
+
+/// How long a track lights up after its service started or failed.
+const FLASH: Duration = Duration::from_millis(2500);
+
+/// How long a connection test may take before it counts as failed.
+const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Where the header ends, measured from the window's top: the host menu
 /// opens below it.
@@ -64,10 +75,18 @@ pub fn run(hosts: Vec<HostEntry>, selected: Option<usize>, problems: Vec<String>
 pub enum Message {
     Tick,
     Refresh,
+    Poll,
+    CopyDiagnostics,
+    DiagnosticsReady(String),
     /// A snapshot for the host connection of the given generation.
     Loaded(u64, Result<Arc<Snapshot>, String>),
     ToggleHostMenu,
     SelectHost(usize),
+    /// A frame is due while tracks are lighting up.
+    Frame,
+    /// Opens the host dialog for `hosts[index]`, or for a new host.
+    OpenForm(Option<usize>),
+    Form(FormMessage),
     SetZoom(Zoom),
     SetScope(Scope),
     /// A track was clicked.
@@ -117,6 +136,11 @@ struct App {
     generation: u64,
     host_menu: bool,
     host_problems: Vec<String>,
+    /// The host dialog, while open.
+    form: Option<HostForm>,
+    /// Timers whose service just started or failed, by id: when, and in
+    /// which color their track lights up.
+    flashes: HashMap<String, (Instant, iced::Color)>,
     scope: Scope,
     zoom: Zoom,
     /// The time zone times are shown in: the host's when it is remote and
@@ -153,6 +177,8 @@ impl App {
             generation: 0,
             host_menu: false,
             host_problems,
+            form: None,
+            flashes: HashMap::new(),
             scope: Scope::default(),
             zoom: Zoom::default(),
             tz: TimeZone::system(),
@@ -173,6 +199,9 @@ impl App {
             live: live::State::default(),
             cache: Cache::new(),
         };
+        if let Some(host) = &app.host {
+            diagnostics::host_event(Event::HostSwitch, Redacted::host(host.name()));
+        }
         let task = app.load();
         (app, task)
     }
@@ -204,8 +233,14 @@ impl App {
 
         Subscription::batch([
             clock::subscription(self.zoom.tick()),
-            iced::time::every(refresh).map(|_| Message::Refresh),
+            iced::time::every(refresh).map(|_| Message::Poll),
             keyboard::listen().filter_map(navigation),
+            // Frames only while a track lights up.
+            if self.flashes.is_empty() {
+                Subscription::none()
+            } else {
+                iced::window::frames().map(|_| Message::Frame)
+            },
             // Coming back to the window, e.g. after a suspend, shows the time.
             iced::event::listen_with(|event, _, _| match event {
                 iced::Event::Window(iced::window::Event::Focused) => Some(Message::Tick),
@@ -256,11 +291,15 @@ impl App {
             hosts::remember(&entry.id);
         }
         self.host = Some(entry.connect());
+        if let Some(host) = &self.host {
+            diagnostics::host_event(Event::HostSwitch, Redacted::host(host.name()));
+        }
         self.selected = Some(index);
         self.generation += 1;
         self.snapshot = None;
         self.tracks.clear();
         self.drawer = None;
+        self.flashes.clear();
         self.offset = SignedDuration::ZERO;
         self.tz = TimeZone::system();
         self.error = None;
@@ -278,13 +317,46 @@ impl App {
                 self.rebuild();
                 Task::none()
             }
-            Message::Refresh => self.load(),
+            Message::Refresh => {
+                diagnostics::event(Event::Refresh);
+                self.load()
+            }
+            Message::Poll => {
+                diagnostics::event(Event::PollRefresh);
+                self.load()
+            }
+            Message::CopyDiagnostics => {
+                diagnostics::event(Event::CopyDiagnostics);
+                let version = self
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.systemd_version);
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || diagnostics::report(version))
+                            .await
+                            .unwrap_or_default()
+                    },
+                    Message::DiagnosticsReady,
+                )
+            }
+            Message::DiagnosticsReady(report) => iced::clipboard::write(report),
             Message::Loaded(generation, _) if generation != self.generation => Task::none(),
             Message::Loaded(_, result) => {
                 self.loading = false;
                 match result {
                     Ok(snapshot) => {
                         self.error = None;
+                        if let Some(old) = self
+                            .snapshot
+                            .as_ref()
+                            .filter(|old| old.scope == snapshot.scope)
+                        {
+                            let now = Instant::now();
+                            for (id, color) in flashes(old, &snapshot) {
+                                self.flashes.insert(id, (now, color));
+                            }
+                        }
                         if let Some(clock) = &snapshot.clock {
                             self.offset = clock.offset;
                             self.tz = clock
@@ -308,11 +380,13 @@ impl App {
                 }
             }
             Message::SetZoom(zoom) => {
+                diagnostics::zoom_change(zoom.span().as_secs());
                 self.zoom = zoom;
                 self.rebuild();
                 self.load()
             }
             Message::SetScope(scope) => {
+                diagnostics::scope_change(scope);
                 self.scope = scope;
                 self.live = live::State::default();
                 self.drawer = None;
@@ -372,16 +446,38 @@ impl App {
                 self.cache.clear();
                 self.ensure_logs(false)
             }
+            Message::Navigate(Nav::Back) if self.form.is_some() => {
+                diagnostics::event(Event::DialogClose);
+                self.form = None;
+                Task::none()
+            }
             Message::Navigate(Nav::Back) if self.host_menu => {
                 self.host_menu = false;
                 Task::none()
             }
+            // Keys go to the dialog's fields, not to the music box behind it.
+            Message::Navigate(_) if self.form.is_some() => Task::none(),
             Message::Navigate(nav) => self.navigate(nav),
+            Message::Frame => {
+                self.flashes
+                    .retain(|_, (started, _)| started.elapsed() < FLASH);
+                Task::none()
+            }
             Message::ToggleHostMenu => {
                 self.host_menu = !self.host_menu;
                 Task::none()
             }
             Message::SelectHost(index) => self.select_host(index),
+            Message::OpenForm(index) => {
+                diagnostics::event(Event::DialogOpen);
+                self.host_menu = false;
+                self.form = Some(match index.and_then(|index| self.hosts.get(index)) {
+                    Some(entry) => HostForm::for_entry(entry),
+                    None => HostForm::new(),
+                });
+                Task::none()
+            }
+            Message::Form(message) => self.update_form(message),
             Message::SetTab(tab) => {
                 if let Some(drawer) = &mut self.drawer {
                     drawer.tab = tab;
@@ -415,7 +511,10 @@ impl App {
                     self.live = live::State::Live;
                     Task::none()
                 }
-                live::Event::Changed => self.load(),
+                live::Event::Changed => {
+                    diagnostics::event(Event::LiveRefresh);
+                    self.load()
+                }
                 live::Event::Lost(reason) => {
                     self.live = live::State::Lost(reason);
                     Task::none()
@@ -588,6 +687,7 @@ impl App {
 
     /// Recomputes marks: whether an elapse is planned or skipped depends on now.
     fn rebuild(&mut self) {
+        let _span = diagnostics::span(Phase::Rebuild).entered();
         self.cache.clear();
         let Some(snapshot) = self.snapshot.as_ref().filter(|s| s.scope == self.scope) else {
             self.tracks.clear();
@@ -626,6 +726,12 @@ impl App {
                 .cmp(&a.timer.active)
                 .then_with(|| a.title.cmp(&b.title))
         });
+        diagnostics::counts(
+            tracks.len(),
+            tracks.iter().map(|track| track.timer.runs.len()).sum(),
+            tracks.iter().map(|track| track.marks.len()).sum(),
+            0,
+        );
         self.tracks = tracks;
     }
 
@@ -672,6 +778,17 @@ impl App {
         let content = column![self.header(), body, self.status()]
             .spacing(12)
             .padding(16);
+        if let Some(form) = &self.form {
+            // The dialog dims the window and keeps clicks from reaching it.
+            let shade = container(space::horizontal())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_| container::Style {
+                    background: Some(palette::BACKGROUND.scale_alpha(0.7).into()),
+                    ..container::Style::default()
+                });
+            return stack![content, opaque(shade), center(opaque(form.view()))].into();
+        }
         if !self.host_menu {
             return content.into();
         }
@@ -686,6 +803,143 @@ impl App {
                 .y(HEADER_BOTTOM),
         ]
         .into()
+    }
+
+    fn update_form(&mut self, message: FormMessage) -> Task<Message> {
+        let Some(form) = self.form.as_mut() else {
+            return Task::none();
+        };
+        match message {
+            FormMessage::Edit(field) => {
+                form.update(field);
+                Task::none()
+            }
+            FormMessage::Browse => Task::perform(
+                async {
+                    rfd::AsyncFileDialog::new()
+                        .set_title(fl!("form-browse-title"))
+                        .pick_file()
+                        .await
+                        .map(|file| file.path().display().to_string())
+                },
+                |path| Message::Form(FormMessage::Picked(path)),
+            ),
+            FormMessage::Picked(Some(path)) => {
+                form.update(Field::KeyFile(path));
+                Task::none()
+            }
+            FormMessage::Picked(None) => Task::none(),
+            FormMessage::Test => match form.host() {
+                Err(error) => {
+                    form.error = Some(error);
+                    Task::none()
+                }
+                Ok(saved) => {
+                    form.test_run += 1;
+                    form.test = Test::Running;
+                    let run = form.test_run;
+                    let host = SshHost::new(saved.target());
+                    Task::perform(
+                        async move {
+                            match tokio::time::timeout(TEST_TIMEOUT, systemd::probe(&host)).await {
+                                Ok(result) => result.map_err(|error| error.to_string()),
+                                Err(_) => Err(fl!("form-test-timeout")),
+                            }
+                        },
+                        move |result| Message::Form(FormMessage::Tested(run, result)),
+                    )
+                }
+            },
+            FormMessage::Tested(run, result) => {
+                if run == form.test_run {
+                    form.test = match result {
+                        Ok(probe) => Test::Passed(probe),
+                        Err(error) => Test::Failed(error),
+                    };
+                }
+                Task::none()
+            }
+            FormMessage::Save => {
+                let saved = form
+                    .host()
+                    .and_then(|host| hosts::save(&host, form.editing.as_deref()));
+                match saved {
+                    Ok(id) => {
+                        diagnostics::event(Event::DialogClose);
+                        self.form = None;
+                        self.reload_hosts(Some(&id))
+                    }
+                    Err(error) => {
+                        form.error = Some(error);
+                        Task::none()
+                    }
+                }
+            }
+            FormMessage::Delete => {
+                let Some(id) = form.editing.clone() else {
+                    return Task::none();
+                };
+                match hosts::delete(&id) {
+                    Ok(()) => {
+                        diagnostics::event(Event::DialogClose);
+                        self.form = None;
+                        self.reload_hosts(None)
+                    }
+                    Err(error) => {
+                        form.error = Some(error);
+                        Task::none()
+                    }
+                }
+            }
+            FormMessage::Cancel => {
+                diagnostics::event(Event::DialogClose);
+                self.form = None;
+                Task::none()
+            }
+        }
+    }
+
+    /// Reads the host list again after the dialog changed `hosts.toml`.
+    /// A saved host is shown, connecting anew with its settings; after a
+    /// delete the current host stays, unless it was the one deleted.
+    fn reload_hosts(&mut self, show: Option<&str>) -> Task<Message> {
+        let current = self.entry().map(|entry| entry.id.clone());
+        let command_line = self
+            .hosts
+            .iter()
+            .find(|entry| entry.origin == Origin::CommandLine)
+            .cloned();
+        let (mut hosts, problems) = hosts::load();
+        hosts.extend(command_line);
+        self.hosts = hosts;
+        self.host_problems = problems;
+
+        let find = |id: &str| self.hosts.iter().position(|entry| entry.id == id);
+        match (show.and_then(find), current.as_deref().and_then(find)) {
+            (Some(index), _) => {
+                // Forget the selection so that `select_host` reconnects.
+                self.selected = None;
+                self.select_host(index)
+            }
+            (None, Some(index)) => {
+                self.selected = Some(index);
+                Task::none()
+            }
+            (None, None) if self.hosts.is_empty() => {
+                self.selected = None;
+                self.host = None;
+                self.generation += 1;
+                self.snapshot = None;
+                self.tracks.clear();
+                self.drawer = None;
+                self.cache.clear();
+                Task::none()
+            }
+            (None, None) => {
+                self.selected = None;
+                self.select_host(0)
+            }
+        }
     }
 
     /// The light on the host chip: how the connection to the shown host is.
@@ -712,23 +966,34 @@ impl App {
             } else {
                 palette::FAINT
             };
-            controls::menu_item(
-                row![
-                    controls::dot(light),
-                    column![
-                        text(entry.name.clone()).size(13),
-                        text(detail).size(11).color(palette::MUTED),
-                    ]
-                    .spacing(1),
+            let mut line = row![
+                controls::dot(light),
+                column![
+                    text(entry.name.clone()).size(13),
+                    text(detail).size(11).color(palette::MUTED),
                 ]
-                .spacing(10)
-                .align_y(iced::Alignment::Center),
-                current,
-                Message::SelectHost(index),
-            )
+                .spacing(1),
+                space::horizontal(),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center);
+            // Saved hosts are edited; an alias is saved under a name of its own.
+            if matches!(entry.origin, Origin::Saved | Origin::SshConfig) {
+                line = line.push(controls::link(
+                    fl!("menu-edit"),
+                    Message::OpenForm(Some(index)),
+                ));
+            }
+            controls::menu_item(line, current, Message::SelectHost(index))
         });
 
-        let mut menu = Column::from_iter(items).spacing(2);
+        let mut menu = Column::from_iter(items)
+            .spacing(2)
+            .push(controls::menu_item(
+                text(fl!("menu-add")).size(13),
+                false,
+                Message::OpenForm(None),
+            ));
         if let Some(path) = hosts::hosts_file() {
             menu = menu.push(
                 container(
@@ -784,6 +1049,17 @@ impl App {
             .map(|snapshot| snapshot.downtime.as_slice())
             .unwrap_or_default();
 
+        // Fades out quickly, then lingers: strength (1 - t)².
+        let flashes: Vec<(usize, iced::Color)> = self
+            .tracks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, track)| {
+                let (started, color) = self.flashes.get(&track.timer.id)?;
+                let t = started.elapsed().as_secs_f32() / FLASH.as_secs_f32();
+                (t < 1.0).then(|| (index, color.scale_alpha(0.28 * (1.0 - t).powi(2))))
+            })
+            .collect();
         let rows = musicbox::height(self.tracks.len());
         responsive(move |size| {
             // Below the minimum width the box keeps its size and scrolls
@@ -804,6 +1080,7 @@ impl App {
                     selected: selected.map(|(index, _)| index),
                     selected_run: selected.and_then(|(_, run)| run),
                     focus: self.drawer.as_ref().and_then(|drawer| drawer.focus),
+                    flashes: flashes.clone(),
                     cache: &self.cache,
                 })
                 .width(width)
@@ -937,6 +1214,10 @@ impl App {
         }
         status
             .push(space::horizontal())
+            .push(controls::link(
+                fl!("copy-diagnostics"),
+                Message::CopyDiagnostics,
+            ))
             .push(text(keys).size(12).color(palette::FAINT))
             .spacing(12)
             .padding([0.0, musicbox::PAD])
@@ -973,4 +1254,100 @@ fn navigation(event: keyboard::Event) -> Option<Message> {
         _ => return None,
     };
     Some(Message::Navigate(nav))
+}
+
+/// Timers whose service started a run, or whose latest run failed, since
+/// `old`: orange for a start, red for a failure.
+fn flashes(old: &Snapshot, new: &Snapshot) -> Vec<(String, iced::Color)> {
+    new.timers
+        .iter()
+        .filter_map(|timer| {
+            let before = old.timers.iter().find(|before| before.id == timer.id)?;
+            let latest = timer.runs.last()?;
+            let previous = before.runs.last();
+            let new_run = previous.is_none_or(|run| latest.start > run.start);
+            let started = new_run || (timer.service_active && !before.service_active);
+            let failed = matches!(latest.outcome, Outcome::Failed(_))
+                && previous.is_none_or(|run| {
+                    run.start != latest.start || !matches!(run.outcome, Outcome::Failed(_))
+                });
+            let color = match (failed, started) {
+                (true, _) => palette::FAILED,
+                (false, true) => palette::NOTE,
+                (false, false) => return None,
+            };
+            Some((timer.id.clone(), color))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Run, Timer};
+
+    fn timer(runs: Vec<Run>) -> Timer {
+        Timer {
+            id: "backup.timer".into(),
+            description: String::new(),
+            service: "backup.service".into(),
+            service_active: false,
+            active: true,
+            unit_file_state: "enabled".into(),
+            calendar: Vec::new(),
+            monotonic: Vec::new(),
+            next_elapse: None,
+            last_trigger: None,
+            persistent: false,
+            wake_system: false,
+            accuracy: SignedDuration::from_mins(1),
+            randomized_delay: SignedDuration::ZERO,
+            runs,
+            stopped: Vec::new(),
+        }
+    }
+
+    fn run(second: i64, outcome: Outcome) -> Run {
+        Run {
+            start: Timestamp::from_second(1_800_000_000 + second).unwrap(),
+            end: None,
+            outcome,
+            invocation: None,
+        }
+    }
+
+    fn snapshot(timers: Vec<Timer>) -> Snapshot {
+        Snapshot {
+            systemd_version: None,
+            scope: Scope::System,
+            fetched_at: Timestamp::from_second(1_800_000_000).unwrap(),
+            timers,
+            downtime: Vec::new(),
+            history_known: true,
+            clock: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn tracks_light_up_for_new_runs_and_failures() {
+        let old = snapshot(vec![timer(vec![run(0, Outcome::Success)])]);
+
+        let same = snapshot(vec![timer(vec![run(0, Outcome::Success)])]);
+        assert!(flashes(&old, &same).is_empty());
+
+        let started = snapshot(vec![timer(vec![
+            run(0, Outcome::Success),
+            run(60, Outcome::Running),
+        ])]);
+        assert_eq!(flashes(&old, &started)[0].1, palette::NOTE);
+
+        let failed = snapshot(vec![timer(vec![run(
+            0,
+            Outcome::Failed("exit-code".into()),
+        )])]);
+        assert_eq!(flashes(&old, &failed)[0].1, palette::FAILED);
+        // Still the same failure on the next refresh: no new flash.
+        assert!(flashes(&failed, &failed).is_empty());
+    }
 }
