@@ -3,6 +3,9 @@
 Thank you for helping. Bug reports, ideas, translations and code are all
 welcome.
 
+Everyone taking part is expected to follow the
+[code of conduct](CODE_OF_CONDUCT.md).
+
 ## Reporting bugs and ideas
 
 Open an [issue](https://github.com/estnml/sysorbit/issues/new/choose) and
