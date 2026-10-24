@@ -35,7 +35,10 @@ import re, sys
 path = "Cargo.toml"
 text = open(path).read()
 text = re.sub(r'(?m)^icons = \[.*\]$',
-              'icons = ["assets/sysorbit-macos-512.png", "assets/sysorbit-macos-1024.png"]',
+              # The packager takes 1024 pixels only as 512 at twice the density,
+              # which it reads from "@2x" in the name.
+              'icons = ["assets/sysorbit-macos-128.png", "assets/sysorbit-macos-256.png", '
+              '"assets/sysorbit-macos-512.png", "assets/sysorbit-macos-512@2x.png"]',
               text, count=1)
 if sys.argv[1] == "true":
     # The certificate is alone in the packager's own keychain, so its kind
