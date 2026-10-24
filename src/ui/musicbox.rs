@@ -56,6 +56,8 @@ pub struct MusicBox<'a> {
     pub now: Timestamp,
     pub tz: &'a TimeZone,
     pub selected: Option<usize>,
+    /// Start of the run whose logs are open; ringed on the selected track.
+    pub selected_run: Option<Timestamp>,
     pub cache: &'a Cache,
 }
 
@@ -262,7 +264,8 @@ impl MusicBox<'_> {
             ..Text::default()
         });
 
-        draw_marks(frame, axis, center, &row.marks, self.now);
+        let selected_run = self.selected_run.filter(|_| self.selected == Some(index));
+        draw_marks(frame, axis, center, &row.marks, self.now, selected_run);
 
         if let Some(next) = beyond_window(row, axis.window) {
             frame.fill_text(Text {
@@ -372,7 +375,17 @@ impl canvas::Program<Message> for MusicBox<'_> {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let position = cursor.position_in(bounds)?;
                 let index = self.row_at(position.y)?;
-                Some(canvas::Action::publish(Message::Select(index)).and_capture())
+                let axis = self.axis(bounds.width);
+                let center = Self::row_center(index);
+                // A note opens the logs of its run, anything else the timer.
+                let message = match hit(&self.rows[index].marks, &axis, center, position, self.now)
+                {
+                    Some(Mark::Run { start, .. }) if position.x >= axis.left => {
+                        Message::SelectRun(index, *start)
+                    }
+                    _ => Message::Select(index),
+                };
+                Some(canvas::Action::publish(message).and_capture())
             }
             _ => None,
         }
@@ -418,7 +431,14 @@ impl canvas::Program<Message> for MusicBox<'_> {
 
 /// Draws one track's marks. Everything is clipped to the grid by hand:
 /// clip layers are costly and showed corrupted meshes on wgpu.
-fn draw_marks(frame: &mut Frame, axis: &TimeAxis, center: f32, marks: &[Mark], now: Timestamp) {
+fn draw_marks(
+    frame: &mut Frame,
+    axis: &TimeAxis,
+    center: f32,
+    marks: &[Mark],
+    now: Timestamp,
+    selected_run: Option<Timestamp>,
+) {
     let (left, right) = (axis.left, axis.right);
     let inside = |x: f32| x >= left && x <= right;
 
@@ -569,6 +589,12 @@ fn draw_marks(frame: &mut Frame, axis: &TimeAxis, center: f32, marks: &[Mark], n
                         center,
                         10.0,
                         color,
+                    );
+                }
+                if selected_run == Some(*start) && inside(x0) {
+                    frame.stroke(
+                        &Path::circle(Point::new(x0, center), 10.0),
+                        Stroke::default().with_color(palette::TEXT).with_width(2.0),
                     );
                 }
                 if *outcome == Outcome::Running && inside(x1) {

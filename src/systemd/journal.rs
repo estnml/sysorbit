@@ -10,7 +10,7 @@ use jiff::tz::TimeZone;
 
 use super::{Capabilities, Error, run};
 use crate::host::{Host, Invocation};
-use crate::model::{Downtime, DowntimeKind, Interval, Outcome, Run, Scope};
+use crate::model::{Downtime, DowntimeKind, Interval, LogLine, Outcome, Run, Scope};
 
 // Catalog message IDs from systemd's sd-messages.h.
 const UNIT_STARTING: &str = "7d4958e842da4a758f6c1cdc7b36dcc5";
@@ -41,6 +41,10 @@ struct Entry {
     user_unit: Option<String>,
     #[serde(rename = "UNIT_RESULT")]
     unit_result: Option<String>,
+    #[serde(rename = "INVOCATION_ID")]
+    invocation: Option<String>,
+    #[serde(rename = "USER_INVOCATION_ID")]
+    user_invocation: Option<String>,
 }
 
 impl Entry {
@@ -62,7 +66,8 @@ fn journalctl(since: Timestamp) -> Invocation {
         "--no-pager".to_owned(),
         "--quiet".to_owned(),
         format!("--since=@{}", since.as_second()),
-        "--output-fields=MESSAGE_ID,UNIT,USER_UNIT,UNIT_RESULT".to_owned(),
+        "--output-fields=MESSAGE_ID,UNIT,USER_UNIT,UNIT_RESULT,INVOCATION_ID,USER_INVOCATION_ID"
+            .to_owned(),
     ])
 }
 
@@ -108,6 +113,7 @@ fn assemble_runs(entries: Vec<Entry>) -> HashMap<String, Vec<Run>> {
         let Some(unit) = entry.unit.as_ref().or(entry.user_unit.as_ref()) else {
             continue;
         };
+        let invocation = entry.invocation.clone().or(entry.user_invocation.clone());
         let unit_runs = runs.entry(unit.clone()).or_default();
         let open = unit_runs
             .last()
@@ -125,6 +131,7 @@ fn assemble_runs(entries: Vec<Entry>) -> HashMap<String, Vec<Run>> {
                     start: at,
                     end: None,
                     outcome: Outcome::Running,
+                    invocation,
                 });
             }
             // "Started" for long running services, "Finished" for oneshots;
@@ -147,10 +154,11 @@ fn assemble_runs(entries: Vec<Entry>) -> HashMap<String, Vec<Run>> {
                         start: at,
                         end: None,
                         outcome: Outcome::Running,
+                        invocation,
                     });
                 }
             }
-            UNIT_SUCCESS => close(unit_runs, at, Outcome::Success),
+            UNIT_SUCCESS => close(unit_runs, at, Outcome::Success, invocation),
             UNIT_FAILURE_RESULT | UNIT_FAILED => {
                 // A failing start logs both messages; keep the first.
                 let duplicate = unit_runs.last().is_some_and(|run| {
@@ -161,7 +169,7 @@ fn assemble_runs(entries: Vec<Entry>) -> HashMap<String, Vec<Run>> {
                 });
                 if !duplicate {
                     let result = entry.unit_result.unwrap_or_else(|| "failed".to_owned());
-                    close(unit_runs, at, Outcome::Failed(result));
+                    close(unit_runs, at, Outcome::Failed(result), invocation);
                 }
             }
             _ => {}
@@ -184,7 +192,7 @@ pub fn finish_dangling(runs: &mut [Run]) {
 }
 
 /// Ends the open run, or records an instant run when its start was not logged.
-fn close(runs: &mut Vec<Run>, at: Timestamp, outcome: Outcome) {
+fn close(runs: &mut Vec<Run>, at: Timestamp, outcome: Outcome, invocation: Option<String>) {
     match runs
         .last_mut()
         .filter(|run| run.outcome == Outcome::Running)
@@ -192,13 +200,81 @@ fn close(runs: &mut Vec<Run>, at: Timestamp, outcome: Outcome) {
         Some(run) => {
             run.end = Some(at);
             run.outcome = outcome;
+            run.invocation = run.invocation.take().or(invocation);
         }
         None => runs.push(Run {
             start: at,
             end: Some(at),
             outcome,
+            invocation,
         }),
     }
+}
+
+/// Upper bound of log lines fetched for one run.
+const MAX_LOG_LINES: usize = 5000;
+
+/// Everything one run logged: the service's own output plus what systemd
+/// said about it (start, exit status, result), oldest first.
+pub async fn logs(host: &dyn Host, scope: Scope, invocation: &str) -> Result<Vec<LogLine>, Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Text {
+        Plain(String),
+        // Messages that are not valid UTF-8 arrive as byte arrays.
+        Bytes(Vec<u8>),
+    }
+
+    #[derive(Deserialize)]
+    struct Line {
+        #[serde(rename = "__REALTIME_TIMESTAMP")]
+        realtime: String,
+        #[serde(rename = "PRIORITY")]
+        priority: Option<String>,
+        #[serde(rename = "MESSAGE")]
+        message: Option<Text>,
+    }
+
+    // Lines of the service carry _SYSTEMD_INVOCATION_ID, the manager's lines
+    // about it INVOCATION_ID (USER_INVOCATION_ID from the user manager);
+    // `+` joins the two matches with OR.
+    let manager_field = match scope {
+        Scope::System => "INVOCATION_ID",
+        Scope::User => "USER_INVOCATION_ID",
+    };
+    let mut invocation_args = vec![
+        "--output=json".to_owned(),
+        "--no-pager".to_owned(),
+        "--quiet".to_owned(),
+        format!("--lines={MAX_LOG_LINES}"),
+        "--output-fields=MESSAGE,PRIORITY".to_owned(),
+    ];
+    if scope == Scope::User {
+        invocation_args.push("--user".to_owned());
+    }
+    invocation_args.extend([
+        format!("_SYSTEMD_INVOCATION_ID={invocation}"),
+        "+".to_owned(),
+        format!("{manager_field}={invocation}"),
+    ]);
+
+    let stdout = run(host, Invocation::new("journalctl").args(invocation_args)).await?;
+    Ok(stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Line>(line).ok())
+        .filter_map(|line| {
+            let at = Timestamp::from_microsecond(line.realtime.parse().ok()?).ok()?;
+            let message = match line.message? {
+                Text::Plain(text) => text,
+                Text::Bytes(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            };
+            Some(LogLine {
+                at,
+                priority: line.priority.and_then(|p| p.parse().ok()).unwrap_or(6),
+                message,
+            })
+        })
+        .collect())
 }
 
 /// The host's realtime clock minus its monotonic clock, taken from the
@@ -353,6 +429,8 @@ mod tests {
             unit: Some("backup.service".to_owned()),
             user_unit: None,
             unit_result: result.map(str::to_owned),
+            invocation: Some(format!("run-{usec}")),
+            user_invocation: None,
         }
     }
 

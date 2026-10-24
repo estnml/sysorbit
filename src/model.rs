@@ -125,4 +125,15 @@ pub struct Run {
     pub start: Timestamp,
     pub end: Option<Timestamp>,
     pub outcome: Outcome,
+    /// systemd's invocation ID, which tags every log line of this run.
+    pub invocation: Option<String>,
+}
+
+/// One line a run wrote to the journal.
+#[derive(Debug, Clone)]
+pub struct LogLine {
+    pub at: Timestamp,
+    /// syslog priority: 0 emergency … 3 error, 4 warning … 7 debug.
+    pub priority: u8,
+    pub message: String,
 }

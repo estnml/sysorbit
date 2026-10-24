@@ -224,6 +224,7 @@ mod tests {
             start: ts(hours),
             end: Some(ts(hours)),
             outcome: Outcome::Success,
+            invocation: None,
         }
     }
 

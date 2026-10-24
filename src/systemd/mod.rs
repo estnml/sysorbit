@@ -68,6 +68,15 @@ async fn run(host: &dyn Host, invocation: Invocation) -> Result<String, Error> {
     }
 }
 
+/// The log lines of one run, identified by its invocation ID.
+pub async fn logs(
+    host: &dyn Host,
+    scope: Scope,
+    invocation: &str,
+) -> Result<Vec<crate::model::LogLine>, Error> {
+    journal::logs(host, scope, invocation).await
+}
+
 /// Collects everything the UI needs for `window` in one pass.
 pub async fn snapshot(host: &dyn Host, scope: Scope, window: Interval) -> Result<Snapshot, Error> {
     let mut warnings = Vec::new();
@@ -272,6 +281,44 @@ mod tests {
             };
             assert!(occurrences >= expected, "{name}: {occurrences} occurrences");
         }
+    }
+
+    /// Runs a transient user service and reads its logs back through its
+    /// invocation ID. Run with `cargo test live_run_logs -- --ignored`.
+    #[tokio::test]
+    #[ignore = "needs a systemd user session"]
+    async fn live_run_logs() {
+        let host = LocalHost::new();
+        let unit = format!("sysorbit-logs-test-{}", std::process::id());
+        let since = Timestamp::now() - jiff::SignedDuration::from_secs(5);
+        let output = host
+            .run(&Invocation::new("systemd-run").args([
+                "--user",
+                "--wait",
+                &format!("--unit={unit}"),
+                "/bin/sh",
+                "-c",
+                "echo hello; echo oops >&2; exit 3",
+            ]))
+            .await
+            .expect("systemd-run");
+        assert!(!output.success, "the service exits with 3");
+
+        let service = format!("{unit}.service");
+        let runs = journal::runs(&host, Scope::User, std::slice::from_ref(&service), since)
+            .await
+            .expect("runs");
+        let run = runs[&service].last().expect("one run");
+        let invocation = run.invocation.as_deref().expect("invocation id");
+
+        let lines = logs(&host, Scope::User, invocation).await.expect("logs");
+        let messages: Vec<&str> = lines.iter().map(|line| line.message.as_str()).collect();
+        println!("{messages:#?}");
+        assert!(messages.contains(&"hello") && messages.contains(&"oops"));
+        assert!(
+            messages.iter().any(|message| message.contains("exit-code")),
+            "the manager's failure line belongs to the run"
+        );
     }
 
     /// Reads the real timers of this machine. Run with
