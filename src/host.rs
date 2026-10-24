@@ -81,6 +81,11 @@ pub trait Host: Send + Sync {
 
     /// The host's system bus, or the user's session bus for [`Scope::User`].
     fn bus(&self, scope: Scope) -> BoxFuture<'_, zbus::Result<Connection>>;
+
+    /// Whether this is the machine the app runs on, sharing its clock.
+    fn is_local(&self) -> bool {
+        false
+    }
 }
 
 /// Runs commands on this machine.
@@ -109,6 +114,10 @@ impl LocalHost {
 impl Host for LocalHost {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn is_local(&self) -> bool {
+        true
     }
 
     fn run<'a>(&'a self, invocation: &'a Invocation) -> BoxFuture<'a, io::Result<Output>> {

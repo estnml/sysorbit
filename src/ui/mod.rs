@@ -19,8 +19,8 @@ use iced::widget::canvas::{Cache, Canvas};
 use iced::widget::pane_grid::{self, PaneGrid};
 use iced::widget::{column, container, responsive, row, scrollable, space, stack, text};
 use iced::{Element, Length, Subscription, Task, Theme};
-use jiff::Timestamp;
 use jiff::tz::TimeZone;
+use jiff::{SignedDuration, Timestamp};
 
 use crate::host::Host;
 use crate::i18n::fl;
@@ -94,7 +94,11 @@ struct App {
     host: Arc<dyn Host>,
     scope: Scope,
     zoom: Zoom,
+    /// The time zone times are shown in: the host's when it is remote and
+    /// reports one, else this machine's.
     tz: TimeZone,
+    /// The host's clock minus this machine's; zero for this machine.
+    offset: SignedDuration,
     now: Timestamp,
     snapshot: Option<Arc<Snapshot>>,
     tracks: Vec<Track>,
@@ -117,6 +121,7 @@ impl App {
             scope: Scope::default(),
             zoom: Zoom::default(),
             tz: TimeZone::system(),
+            offset: SignedDuration::ZERO,
             now: Timestamp::now(),
             snapshot: None,
             tracks: Vec::new(),
@@ -181,7 +186,7 @@ impl App {
 
         let host = self.host.clone();
         let scope = self.scope;
-        let window = self.zoom.fetch_window(Timestamp::now());
+        let window = self.zoom.fetch_window(self.host_now());
         Task::perform(
             async move {
                 systemd::snapshot(host.as_ref(), scope, window)
@@ -196,7 +201,7 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => {
-                self.now = Timestamp::now();
+                self.now = self.host_now();
                 self.rebuild();
                 Task::none()
             }
@@ -206,8 +211,16 @@ impl App {
                 match result {
                     Ok(snapshot) => {
                         self.error = None;
+                        if let Some(clock) = &snapshot.clock {
+                            self.offset = clock.offset;
+                            self.tz = clock
+                                .zone
+                                .as_deref()
+                                .and_then(|zone| TimeZone::get(zone).ok())
+                                .unwrap_or_else(TimeZone::system);
+                        }
                         self.snapshot = Some(snapshot);
-                        self.now = Timestamp::now();
+                        self.now = self.host_now();
                         self.rebuild();
                     }
                     Err(error) => self.error = Some(error),
@@ -326,6 +339,12 @@ impl App {
                 }
             },
         }
+    }
+
+    /// The host's current time, which for a remote host may differ from
+    /// this machine's clock.
+    fn host_now(&self) -> Timestamp {
+        Timestamp::now() + self.offset
     }
 
     /// Index of the selected timer's track.
@@ -702,15 +721,33 @@ impl App {
             String::new()
         };
 
-        row![
+        // A clock off by more than a few seconds is worth noticing.
+        let clock = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.clock.as_ref())
+            .map(|clock| {
+                let color = if clock.offset.abs() >= SignedDuration::from_secs(5) {
+                    palette::NOTE
+                } else {
+                    palette::MUTED
+                };
+                text(label::host_clock(clock)).size(12).color(color)
+            });
+
+        let mut status = row![
             text(indicator).size(12).color(color),
             text(parts.join("  ·  ")).size(12).color(palette::MUTED),
-            space::horizontal(),
-            text(keys).size(12).color(palette::FAINT),
-        ]
-        .spacing(12)
-        .padding([0.0, musicbox::PAD])
-        .into()
+        ];
+        if let Some(clock) = clock {
+            status = status.push(clock);
+        }
+        status
+            .push(space::horizontal())
+            .push(text(keys).size(12).color(palette::FAINT))
+            .spacing(12)
+            .padding([0.0, musicbox::PAD])
+            .into()
     }
 }
 

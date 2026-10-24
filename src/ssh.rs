@@ -375,6 +375,18 @@ mod tests {
             );
             assert!(snapshot.history_known, "{scope:?}");
         }
+
+        // Outside systemd-journal the system's runs are unknown, not absent.
+        let viewer = test_host_as("viewer");
+        let snapshot = systemd::snapshot(&viewer, Scope::System, window)
+            .await
+            .expect("snapshot as viewer");
+        assert!(!snapshot.history_known);
+        assert!(
+            snapshot
+                .warnings
+                .contains(&crate::model::Warning::JournalRestricted)
+        );
     }
 
     /// A rejected login reports what ssh said. Run with

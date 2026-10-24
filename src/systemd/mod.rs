@@ -2,6 +2,7 @@
 
 mod calendar;
 mod capabilities;
+mod clock;
 mod dbus;
 mod journal;
 mod units;
@@ -20,10 +21,19 @@ use crate::model::{Interval, Scope, Snapshot, Warning};
 
 #[derive(Debug, Clone)]
 pub enum Error {
-    Spawn { command: String, reason: String },
-    Command { command: String, stderr: String },
+    Spawn {
+        command: String,
+        reason: String,
+    },
+    Command {
+        command: String,
+        stderr: String,
+    },
     Parse(String),
     Bus(String),
+    /// The journal shows only the user's own entries: the user is in
+    /// neither `systemd-journal` nor `adm`.
+    JournalRestricted,
 }
 
 impl From<zbus::Error> for Error {
@@ -45,6 +55,7 @@ impl fmt::Display for Error {
             Self::Command { command, stderr } => write!(f, "`{command}` failed: {stderr}"),
             Self::Parse(reason) => write!(f, "unreadable output: {reason}"),
             Self::Bus(reason) => write!(f, "D-Bus error: {reason}"),
+            Self::JournalRestricted => write!(f, "the journal shows only this user's entries"),
         }
     }
 }
@@ -53,13 +64,18 @@ impl std::error::Error for Error {}
 
 /// Runs `invocation` and returns its stdout, failing on a non-zero exit.
 async fn run(host: &dyn Host, invocation: Invocation) -> Result<String, Error> {
+    Ok(run_output(host, invocation).await?.stdout)
+}
+
+/// Like [`run`], keeping stderr for callers that read warnings from it.
+async fn run_output(host: &dyn Host, invocation: Invocation) -> Result<crate::host::Output, Error> {
     let output = host.run(&invocation).await.map_err(|error| Error::Spawn {
         command: invocation.to_string(),
         reason: error.to_string(),
     })?;
 
     if output.success {
-        Ok(output.stdout)
+        Ok(output)
     } else {
         Err(Error::Command {
             command: invocation.to_string(),
@@ -86,7 +102,19 @@ pub async fn snapshot(host: &dyn Host, scope: Scope, window: Interval) -> Result
         None
     });
     let bus = bus?;
-    let capabilities = Capabilities::detect(&bus).await;
+    let (capabilities, clock) = tokio::join!(Capabilities::detect(&bus), async {
+        // This machine's own clock needs no comparing.
+        if host.is_local() {
+            None
+        } else {
+            Some(clock::read(host, &bus).await)
+        }
+    });
+    let clock = clock.and_then(|clock| {
+        clock
+            .inspect_err(|error| warnings.push(Warning::ClockUnavailable(error.to_string())))
+            .ok()
+    });
     warnings.extend(capabilities.limitations());
     let (mut timers, unit_warnings) = units::load(&bus, clock_offset).await?;
     warnings.extend(unit_warnings);
@@ -116,7 +144,10 @@ pub async fn snapshot(host: &dyn Host, scope: Scope, window: Interval) -> Result
 
     let history_known = history.is_ok();
     let mut history = history.unwrap_or_else(|error| {
-        warnings.push(Warning::HistoryUnavailable(error.to_string()));
+        warnings.push(match error {
+            Error::JournalRestricted => Warning::JournalRestricted,
+            error => Warning::HistoryUnavailable(error.to_string()),
+        });
         journal::History::default()
     });
     let downtime = downtime.unwrap_or_else(|error| {
@@ -147,6 +178,7 @@ pub async fn snapshot(host: &dyn Host, scope: Scope, window: Interval) -> Result
         timers,
         downtime,
         history_known,
+        clock,
         warnings,
     })
 }

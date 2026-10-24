@@ -33,7 +33,16 @@ warning-next-elapse-only = only the next elapse is shown (systemd < 242)
 warning-no-past-elapses = past elapses are not shown (systemd < 244)
 warning-monotonic = Monotonic times unavailable: { $error }
 warning-history = History unavailable: { $error }
+warning-journal-restricted = History unavailable: the journal shows only this user's entries. Add the user to the systemd-journal group.
 warning-downtime = Downtime unavailable: { $error }
+warning-clock = Server clock unavailable: { $error }
+# The remote host's clock compared with this machine's.
+host-clock-synced = server clock in sync
+host-clock = server clock { $direction ->
+    [ahead] { $span } ahead
+   *[behind] { $span } behind
+}
+host-zone = server time ({ $zone })
 warning-unreadable = { $unit } unreadable: { $error }
 
 ## Dates and durations

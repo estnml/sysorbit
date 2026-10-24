@@ -35,7 +35,20 @@ pub struct Snapshot {
     /// False when the journal could not be read; past occurrences then cannot
     /// be judged as skipped.
     pub history_known: bool,
+    /// The host's clock, for hosts other than this machine.
+    pub clock: Option<HostClock>,
     pub warnings: Vec<Warning>,
+}
+
+/// How a remote host's clock relates to this machine's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostClock {
+    /// The host's time minus this machine's.
+    pub offset: SignedDuration,
+    /// How far off `offset` may be: half the round trip it was measured in.
+    pub uncertainty: SignedDuration,
+    /// The host's IANA time zone, e.g. `Europe/Istanbul`, when known.
+    pub zone: Option<String>,
 }
 
 /// Something the snapshot could not fully show. Errors carry systemd's or
@@ -52,7 +65,12 @@ pub enum Warning {
     NoPastElapses,
     MonotonicUnavailable(String),
     HistoryUnavailable(String),
+    /// The journal hides other users' and the system's entries, so past
+    /// runs are unknown.
+    JournalRestricted,
     DowntimeUnavailable(String),
+    /// The remote host's clock could not be read.
+    ClockUnavailable(String),
     Unreadable {
         unit: String,
         error: String,

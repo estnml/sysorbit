@@ -29,7 +29,15 @@ warning-next-elapse-only = yalnızca bir sonraki tetiklenme gösteriliyor (syste
 warning-no-past-elapses = geçmiş tetiklenmeler gösterilmiyor (systemd < 244)
 warning-monotonic = Monotonik zamanlar alınamadı: { $error }
 warning-history = Geçmiş alınamadı: { $error }
+warning-journal-restricted = Geçmiş alınamadı: journal yalnızca bu kullanıcının kayıtlarını gösteriyor. Kullanıcıyı systemd-journal grubuna ekleyin.
 warning-downtime = Kapalı kalma süreleri alınamadı: { $error }
+warning-clock = Sunucu saati okunamadı: { $error }
+host-clock-synced = sunucu saati senkron
+host-clock = sunucu saati { $direction ->
+    [ahead] { $span } ileri
+   *[behind] { $span } geri
+}
+host-zone = sunucu saati ({ $zone })
 warning-unreadable = { $unit } okunamadı: { $error }
 
 ## Dates and durations

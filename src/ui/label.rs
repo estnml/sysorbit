@@ -6,7 +6,7 @@ use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
 
 use crate::i18n::{self, fl};
-use crate::model::{MonotonicBase, Timer, Warning};
+use crate::model::{HostClock, MonotonicBase, Timer, Warning};
 
 pub fn weekday(day: Weekday) -> String {
     match day {
@@ -163,6 +163,32 @@ pub fn join(items: &[String]) -> String {
     }
 }
 
+/// How the remote host's clock relates to this machine's, and its zone:
+/// `server clock 3s ahead · server time (Europe/Istanbul)`. Offsets within
+/// a second, or within the measuring error, count as in sync.
+pub fn host_clock(clock: &HostClock) -> String {
+    let tolerance = clock.uncertainty.max(SignedDuration::from_secs(1));
+    let mut text = if clock.offset.abs() < tolerance {
+        fl!("host-clock-synced")
+    } else {
+        let direction = if clock.offset.is_negative() {
+            "behind"
+        } else {
+            "ahead"
+        };
+        fl!(
+            "host-clock",
+            direction = direction,
+            span = span(clock.offset.abs())
+        )
+    };
+    if let Some(zone) = &clock.zone {
+        text.push_str(" · ");
+        text.push_str(&fl!("host-zone", zone = zone.as_str()));
+    }
+    text
+}
+
 /// A snapshot warning for the status line.
 pub fn warning(warning: &Warning) -> String {
     match warning {
@@ -175,6 +201,8 @@ pub fn warning(warning: &Warning) -> String {
         Warning::NoPastElapses => fl!("warning-no-past-elapses"),
         Warning::MonotonicUnavailable(error) => fl!("warning-monotonic", error = error.as_str()),
         Warning::HistoryUnavailable(error) => fl!("warning-history", error = error.as_str()),
+        Warning::JournalRestricted => fl!("warning-journal-restricted"),
+        Warning::ClockUnavailable(error) => fl!("warning-clock", error = error.as_str()),
         Warning::DowntimeUnavailable(error) => fl!("warning-downtime", error = error.as_str()),
         Warning::Unreadable { unit, error } => fl!(
             "warning-unreadable",

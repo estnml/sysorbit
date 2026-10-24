@@ -8,7 +8,7 @@ use serde::Deserialize;
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
 
-use super::{Capabilities, Error, run};
+use super::{Capabilities, Error, run, run_output};
 use crate::host::{Host, Invocation};
 use crate::model::{Downtime, DowntimeKind, Interval, LogLine, Outcome, Run, Scope};
 
@@ -127,13 +127,36 @@ pub async fn history(
             .map(|id| format!("MESSAGE_ID={id}")),
         );
 
-    let (timers, services): (Vec<Entry>, Vec<Entry>) = parse_entries(&run(host, invocation).await?)
+    // The system's entries are hidden from users outside `systemd-journal`
+    // and `adm`; journalctl then succeeds with nothing to show.
+    let (output, restricted) = match scope {
+        Scope::System => tokio::join!(run(host, invocation), system_hidden(host)),
+        Scope::User => (run(host, invocation).await, false),
+    };
+    if restricted {
+        return Err(Error::JournalRestricted);
+    }
+    let (timers, services): (Vec<Entry>, Vec<Entry>) = parse_entries(&output?)
         .into_iter()
         .partition(|entry| entry.unit().is_some_and(|unit| unit.ends_with(".timer")));
     Ok(History {
         runs: assemble_runs(services),
         switches: assemble_switches(timers),
     })
+}
+
+/// Whether the journal hides other users' and the system's entries from
+/// this user. journalctl says so on stderr, though not with JSON output;
+/// asking for no lines gets just that notice.
+async fn system_hidden(host: &dyn Host) -> bool {
+    let check = Invocation::new("journalctl").args(["--no-pager", "--lines=0"]);
+    run_output(host, check)
+        .await
+        .is_ok_and(|output| restricted(&output.stderr))
+}
+
+fn restricted(stderr: &str) -> bool {
+    stderr.contains("not seeing messages from other users and the system")
 }
 
 fn assemble_switches(entries: Vec<Entry>) -> HashMap<String, Vec<Switch>> {
@@ -726,5 +749,43 @@ IDX  BOOT ID                          FIRST ENTRY                 LAST ENTRY
         assert_eq!(runs[0].outcome, Outcome::Success);
         assert_eq!(runs[0].end, runs[0].start.into());
         assert_eq!(runs[2].outcome, Outcome::Running);
+    }
+
+    /// A host whose journal hides the system's entries.
+    struct RestrictedJournal;
+
+    impl Host for RestrictedJournal {
+        fn name(&self) -> &str {
+            "restricted"
+        }
+
+        fn run<'a>(
+            &'a self,
+            _invocation: &'a Invocation,
+        ) -> crate::host::BoxFuture<'a, std::io::Result<crate::host::Output>> {
+            Box::pin(async {
+                Ok(crate::host::Output {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: "Hint: You are currently not seeing messages from other users and \
+                             the system.\n"
+                        .to_owned(),
+                })
+            })
+        }
+
+        fn bus(&self, _scope: Scope) -> crate::host::BoxFuture<'_, zbus::Result<zbus::Connection>> {
+            Box::pin(async { Err(zbus::Error::Unsupported) })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_journal_hiding_the_system_is_not_an_empty_history() {
+        let units = ["backup.service".to_owned()];
+        let system = history(&RestrictedJournal, Scope::System, &units, at(0)).await;
+        assert!(matches!(system, Err(Error::JournalRestricted)));
+        // The user's own journal is complete.
+        let user = history(&RestrictedJournal, Scope::User, &units, at(0)).await;
+        assert!(user.is_ok());
     }
 }
