@@ -1,0 +1,72 @@
+name: Bug report
+description: Something in sysorbit does not work as it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Security problems go to [private reporting](https://github.com/estnml/sysorbit/security/advisories/new) instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the host menu and pick …
+        2. …
+  - type: input
+    id: version
+    attributes:
+      label: sysorbit version
+      description: From the release you installed, or the commit for a source build.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you installed it
+      options:
+        - DEB package
+        - RPM package
+        - Arch package or AUR
+        - macOS disk image
+        - Built from source
+        - CI binary
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Computer running sysorbit
+      description: Operating system and version, and on Linux the desktop or compositor.
+      placeholder: Fedora 43, GNOME 49
+    validations:
+      required: true
+  - type: dropdown
+    id: host
+    attributes:
+      label: Host being shown
+      options:
+        - This computer
+        - A Linux host over SSH
+    validations:
+      required: true
+  - type: input
+    id: systemd
+    attributes:
+      label: Host's distribution and systemd version
+      description: On the host, `systemctl --version | head -1` prints the systemd version.
+      placeholder: Debian 13, systemd 257
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: |
+        sysorbit's log files hold codes, counts and pseudonyms, never host or unit names, so they are safe to attach. [LOGGING.md](https://github.com/estnml/sysorbit/blob/main/LOGGING.md) says where they are. Drag files or screenshots here.

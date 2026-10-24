@@ -1,0 +1,20 @@
+name: Translation
+description: Offer or fix a translation of the interface.
+labels: [translation]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        No Rust is needed: [TRANSLATING.md](https://github.com/estnml/sysorbit/blob/main/TRANSLATING.md) explains how to add or improve a language. A pull request with the `.ftl` file is the quickest way in.
+  - type: input
+    id: language
+    attributes:
+      label: Language
+      placeholder: German (de)
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: For a fix, the wrong text, where it appears, and what it should say.
