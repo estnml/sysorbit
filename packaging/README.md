@@ -43,8 +43,9 @@ makepkg
 dependencies. The local archive lets this test run before a GitHub Release exists.
 
 The Linux packages workflow performs the same build and prepares `.SRCINFO` and
-an Arch package. It only uploads Actions artifacts; it does not create a GitHub
-Release or publish to AUR.
+an Arch package. Run by hand, it only uploads Actions artifacts. For a `v*` tag
+that passes every installation test, it also creates a draft GitHub Release
+with the packages; it never publishes the release or submits to AUR.
 Installation tests launch the desktop entry in an isolated Xvfb session on
 Debian 12, Fedora 43 and Arch. They check window creation with software rendering;
 they do not exercise a real Wayland session or GPU driver.
@@ -75,11 +76,22 @@ configuration and SSH agent as the desktop session.
 
 ## Publication
 
-Before publishing, set the version in `Cargo.toml` and build that exact revision.
-Upload the DEB, RPM and `sysorbit-VERSION-linux-x86_64.tar.gz` to a GitHub Release
-tagged `vVERSION`. Keep the archive unchanged after generating the AUR checksum.
-Submit the generated `PKGBUILD`, `.SRCINFO` and `LICENSE` to the `sysorbit-bin`
-AUR repository separately. Only then will `yay -S sysorbit-bin` work.
+Set the version in `Cargo.toml`, commit, then tag and push that commit:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow checks that the tag matches `Cargo.toml`, builds and tests the
+packages, and creates a draft release `v0.1.0` with the DEB, RPM, Arch package,
+`sysorbit-VERSION-linux-x86_64.tar.gz`, `PKGBUILD` and `.SRCINFO`. Review the
+notes on GitHub and publish it. The archive in the release is the one the AUR
+checksum was made from; do not replace it.
+
+Submit the release's `PKGBUILD`, `.SRCINFO` and the repository's `LICENSE` to the
+`sysorbit-bin` AUR repository separately. Only then will `yay -S sysorbit-bin`
+work.
 
 AUR updates require a new recipe and checksum for each release. AUR availability
 does not put a package in Arch's official repositories, so `pacman -S sysorbit`
