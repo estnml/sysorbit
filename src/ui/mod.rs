@@ -1982,4 +1982,133 @@ mod tests {
         app.rebuild();
         assert!(ratio(&app) > alone, "{} > {alone}", ratio(&app));
     }
+
+    /// Takes the README's screenshots from a real host of the demo fleet
+    /// (`tests/fleet/run.sh`), so they show real timers and history but
+    /// nothing of this machine. Run with
+    /// `SYSORBIT_SCREENSHOTS=assets/screenshots cargo test readme_screenshots -- --ignored`;
+    /// `SYSORBIT_SCREENSHOT_PORT` picks another fleet host than debian-13.
+    #[tokio::test]
+    #[ignore = "needs the demo fleet from tests/fleet/run.sh"]
+    // English must hold through the whole run, awaits included; the test
+    // is run by itself on a single thread, so nothing waits for the lock.
+    #[allow(clippy::await_holding_lock)]
+    async fn readme_screenshots() {
+        let Some(directory) = std::env::var_os("SYSORBIT_SCREENSHOTS") else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let port = std::env::var("SYSORBIT_SCREENSHOT_PORT")
+            .ok()
+            .and_then(|port| port.parse().ok())
+            .unwrap_or(2301);
+        let _language = crate::i18n::test_language("en");
+
+        // Saved as `<name>-<renderer>.png` by iced_test, then renamed.
+        let render = |app: &App, name: &str, size: iced::Size| {
+            let mut simulator =
+                iced_test::Simulator::with_size(iced::Settings::default(), size, app.view());
+            let snapshot = simulator.snapshot(&app.theme()).expect("snapshot");
+            let stem = directory.join(format!("{name}-render"));
+            for entry in std::fs::read_dir(&directory).unwrap().flatten() {
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{name}-render"))
+                {
+                    std::fs::remove_file(entry.path()).unwrap();
+                }
+            }
+            assert!(snapshot.matches_image(&stem).expect("write"));
+            let written = std::fs::read_dir(&directory)
+                .unwrap()
+                .flatten()
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(&format!("{name}-render"))
+                })
+                .expect("rendered file");
+            std::fs::rename(written.path(), directory.join(format!("{name}.png"))).unwrap();
+        };
+
+        let target = crate::ssh::Target {
+            destination: "sysorbit@localhost".to_owned(),
+            port: Some(port),
+            options: [
+                "StrictHostKeyChecking=no",
+                "UserKnownHostsFile=/dev/null",
+                "LogLevel=ERROR",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+        };
+        let entry = HostEntry {
+            id: "fleet".to_owned(),
+            name: "Fleet: debian-13".to_owned(),
+            kind: hosts::HostKind::Ssh(target),
+            origin: Origin::DropIn,
+            saved: None,
+        };
+        let (mut app, _) = App::new(vec![entry], Some(0), Vec::new());
+        app.zoom = Zoom::Hours;
+        let host = app.host.clone().unwrap();
+        let window = app.zoom.fetch_window(app.host_now());
+        let snapshot = systemd::snapshot(host.as_ref(), Scope::System, window)
+            .await
+            .expect("snapshot of the fleet host");
+        let capabilities = snapshot.capabilities;
+        let _ = app.update(Message::Loaded(app.generation, Ok(Arc::new(snapshot))));
+        app.live = live::State::Live;
+
+        // A timer that sometimes fails, with its overview open.
+        let index = app
+            .tracks
+            .iter()
+            .position(|track| track.timer.id == "flaky-sync.timer")
+            .expect("flaky-sync on the fleet host");
+        let _ = app.update(Message::Select(index));
+        render(&app, "music-box", SIZE);
+
+        // A week shows the draft's notes; a taller window shows the grid.
+        let _ = app.update(Message::Deselect);
+        app.zoom = Zoom::Week;
+        let window = app.zoom.fetch_window(app.host_now());
+        let snapshot = systemd::snapshot(host.as_ref(), Scope::System, window)
+            .await
+            .expect("snapshot of the fleet host");
+        let _ = app.update(Message::Loaded(app.generation, Ok(Arc::new(snapshot))));
+        app.window_height = 1180.0;
+        let _ = app.update(Message::OpenComposer);
+        let composer = app.composer.as_mut().unwrap();
+        composer.update(composer::Field::Name("db-dump".to_owned()));
+        composer.update(composer::Field::Description(
+            "Dump the databases".to_owned(),
+        ));
+        composer.update(composer::Field::Command(
+            "/usr/local/bin/dump-databases --compress".to_owned(),
+        ));
+        composer.edit(rhythm::Edit::Preset(rhythm::Preset::WorkdayMornings));
+        for (day, hour) in [(0, 18), (1, 18), (2, 18), (3, 18), (4, 18), (5, 11)] {
+            composer.edit(rhythm::Edit::Paint {
+                day,
+                hour,
+                on: true,
+            });
+        }
+        let previews = systemd::calendar::preview(
+            host.as_ref(),
+            &composer.expressions(),
+            window,
+            capabilities,
+        )
+        .await
+        .expect("systemd's preview");
+        composer.schedule = Schedule::Ready(previews);
+        composer.set_hint(Some(rhythm::Hint::Cell(5, 11)));
+        app.rebuild();
+        render(&app, "composer", iced::Size::new(SIZE.width, 1180.0));
+    }
 }

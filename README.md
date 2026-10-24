@@ -1,4 +1,8 @@
-# sysorbit
+<p align="center">
+  <img src="assets/sysorbit.svg" width="112" alt="sysorbit icon">
+</p>
+
+<h1 align="center">sysorbit</h1>
 
 A cross-platform desktop application for Linux, macOS, and Windows to visualize
 systemd timers (239+) on local and remote Linux hosts. Its music-box timeline
@@ -6,11 +10,23 @@ brings schedules, past runs and upcoming triggers into one view.
 
 Built with Rust and [iced](https://iced.rs).
 
+![The music box: a host's timers on one timeline, with a timer's overview open](assets/screenshots/music-box.png)
+
+Every timer is a track; runs and upcoming elapses are its notes. Select one for
+its schedule, recent runs and journal logs.
+
+![Composing a new timer: hours painted on the rhythm grid appear as a draft track among the other timers](assets/screenshots/composer.png)
+
+New timers are composed rather than typed: paint the hours on the rhythm grid,
+and a draft track shows when it will run among your other timers, as systemd
+itself computes it.
+
 ## Features
 
 - Browse system and user timers with live updates.
 - Explore schedules, run history and journal logs.
-- Create a timer and its service, previewing the unit files before they are installed.
+- Create a timer and its service by painting its schedule, with a live preview
+  among the existing timers and the unit files shown before they are installed.
 - Connect to Linux hosts over SSH and switch between saved hosts.
 - View the interface in English or Turkish.
 - Keep privacy-preserving local logs for bug reports.
@@ -21,11 +37,11 @@ schedule detail on older versions.
 
 ## Installation
 
-Linux packaging is available for DEB, RPM and Arch/AUR on x86_64, including an
+Linux packages for x86_64 (DEB, RPM and Arch) are attached to each
+[GitHub release](https://github.com/estnml/sysorbit/releases), with an
 application menu entry and icon. See [Linux packaging](packaging/README.md) for
-build and installation instructions. These packages have not been published to
-GitHub Releases or AUR yet. macOS and Windows currently require a source build
-or a CI binary.
+installation and build instructions. The AUR package is not published yet.
+macOS and Windows currently require a source build or a CI binary.
 
 ## Build and run
 
@@ -58,6 +74,15 @@ cargo test
 
 CI builds and tests all three platforms. Development binaries are attached as
 artifacts to successful [GitHub Actions runs](https://github.com/estnml/sysorbit/actions).
+
+The screenshots come from a host of the demo fleet in
+[tests/fleet](tests/fleet/run.sh), never from a real machine. With the fleet
+running, take them again after interface changes:
+
+```sh
+tests/fleet/run.sh
+SYSORBIT_SCREENSHOTS=assets/screenshots cargo test readme_screenshots -- --ignored
+```
 
 See [LOGGING.md](LOGGING.md) for local diagnostics and privacy details, and
 [TRANSLATING.md](TRANSLATING.md) to contribute a translation.
