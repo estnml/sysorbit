@@ -264,7 +264,8 @@ fn outcome(run: &Run) -> (String, iced::Color) {
 
 fn duration(run: &Run) -> String {
     match (run.end, &run.outcome) {
-        (Some(end), outcome) if *outcome != Outcome::Running => {
+        // An end equal to the start means systemd logged no end.
+        (Some(end), outcome) if *outcome != Outcome::Running && end > run.start => {
             timespan::format(end.duration_since(run.start))
         }
         _ => String::new(),

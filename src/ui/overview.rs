@@ -261,6 +261,8 @@ fn recent<'a>(
         .iter()
         .filter(|run| run.outcome != Outcome::Running)
         .filter_map(|run| Some(run.end?.duration_since(run.start)))
+        // Zero means systemd logged no end, as for simple user services.
+        .filter(|duration| !duration.is_zero())
         .collect();
     durations.sort();
     let failed = timer
@@ -297,6 +299,8 @@ fn recent<'a>(
             format!("p95 {}", timespan::format(p95)),
             palette::MUTED,
         ));
+    } else if succeeded + failed > 0 {
+        stats.push(stat("durations not logged".to_owned(), palette::FAINT));
     }
 
     column![chart, Row::from_vec(stats).spacing(12)]
@@ -613,7 +617,7 @@ impl canvas::Program<Message> for RunChart<'_> {
                         format!(
                             "{} · {} · {outcome}",
                             label::moment(run.start, &self.tz),
-                            timespan::format(self.duration(run))
+                            duration_label(self.duration(run))
                         ),
                         palette::TEXT,
                     )
@@ -650,6 +654,15 @@ impl canvas::Program<Message> for RunChart<'_> {
         } else {
             mouse::Interaction::default()
         }
+    }
+}
+
+/// `1.2s`, or a note when systemd logged no end for the run.
+fn duration_label(duration: SignedDuration) -> String {
+    if duration.is_zero() {
+        "duration not logged".to_owned()
+    } else {
+        timespan::format(duration)
     }
 }
 

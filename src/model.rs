@@ -69,6 +69,9 @@ pub struct Timer {
     pub accuracy: SignedDuration,
     pub randomized_delay: SignedDuration,
     pub runs: Vec<Run>,
+    /// Stretches when the timer was stopped while the machine was up, or
+    /// did not exist yet; its elapses there were never due.
+    pub stopped: Vec<Interval>,
 }
 
 impl Timer {

@@ -95,7 +95,8 @@ pub fn marks(
             continue;
         }
 
-        if !judge_past {
+        // Nothing was due while the timer was stopped or did not exist.
+        if !judge_past || timer.stopped.iter().any(|period| period.contains(at)) {
             continue;
         }
         // An elapse while the machine was down can only have been caught up
@@ -216,6 +217,7 @@ mod tests {
             accuracy: SignedDuration::from_mins(1),
             randomized_delay: SignedDuration::ZERO,
             runs,
+            stopped: Vec::new(),
         }
     }
 
@@ -295,5 +297,17 @@ mod tests {
         let timer = timer(vec![ts(0)], Vec::new());
         let marks = marks(&timer, &[], false, ts(12));
         assert!(marks.is_empty());
+    }
+
+    #[test]
+    fn elapses_while_stopped_are_not_skipped() {
+        let mut timer = timer(vec![ts(1), ts(2), ts(3)], vec![run_at(3)]);
+        timer.stopped = vec![Interval {
+            start: ts(0),
+            end: ts(2) + SignedDuration::from_mins(30),
+        }];
+        let marks = marks(&timer, &[], true, ts(4));
+        assert_eq!(marks.len(), 1, "{marks:?}");
+        assert!(matches!(marks[0], Mark::Run { .. }));
     }
 }

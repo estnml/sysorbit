@@ -18,6 +18,7 @@ const UNIT_STARTED: &str = "39f53479d3a045ac8e11786248231fbf";
 const UNIT_SUCCESS: &str = "7ad2d189f7e94e70a38c781354912448";
 const UNIT_FAILURE_RESULT: &str = "d9b373ed55a64feb8242e02dbe79a49c";
 const UNIT_FAILED: &str = "be02cf6855d2428ba40df7e9d022f03d";
+const UNIT_STOPPED: &str = "9d1aaa27d60140bd96365fd3e7aed5d5";
 const SLEEP_START: &str = "6bbd95ee977941e497c48be27c254128";
 const SLEEP_STOP: &str = "8811e6df2a8e40f58a94cea26f8ebf14";
 
@@ -26,6 +27,10 @@ const JUST_ENDED: SignedDuration = SignedDuration::from_secs(5);
 
 /// Gaps between boots shorter than this are reboots, not downtime worth showing.
 const MIN_DOWNTIME: SignedDuration = SignedDuration::from_mins(2);
+
+/// A timer stopped or started this close to a shutdown or boot was stopped
+/// or started by it. Also the shortest stop worth hiding elapses for.
+const BOOT_SLACK: SignedDuration = SignedDuration::from_mins(10);
 
 #[derive(Deserialize)]
 struct Entry {
@@ -51,6 +56,26 @@ impl Entry {
     fn at(&self) -> Option<Timestamp> {
         Timestamp::from_microsecond(self.realtime.parse().ok()?).ok()
     }
+
+    fn unit(&self) -> Option<&String> {
+        self.unit.as_ref().or(self.user_unit.as_ref())
+    }
+}
+
+/// A timer being started (`on`) or stopped, from its job messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Switch {
+    pub at: Timestamp,
+    pub on: bool,
+}
+
+/// What the journal knows about a set of units, by unit name.
+#[derive(Debug, Default)]
+pub struct History {
+    /// Runs of services.
+    pub runs: HashMap<String, Vec<Run>>,
+    /// Starts and stops of timers, oldest first.
+    pub switches: HashMap<String, Vec<Switch>>,
 }
 
 fn parse_entries(stdout: &str) -> Vec<Entry> {
@@ -71,15 +96,16 @@ fn journalctl(since: Timestamp) -> Invocation {
     ])
 }
 
-/// Runs of the given services since `since`, keyed by service name.
-pub async fn runs(
+/// Runs of the given services and switches of the given timers since
+/// `since`, in one journal query.
+pub async fn history(
     host: &dyn Host,
     scope: Scope,
-    services: &[String],
+    units: &[String],
     since: Timestamp,
-) -> Result<HashMap<String, Vec<Run>>, Error> {
-    if services.is_empty() {
-        return Ok(HashMap::new());
+) -> Result<History, Error> {
+    if units.is_empty() {
+        return Ok(History::default());
     }
 
     // Matches on different fields are ANDed, on the same field ORed.
@@ -88,7 +114,7 @@ pub async fn runs(
         Scope::User => ("USER_UNIT", journalctl(since).arg("--user")),
     };
     let invocation = invocation
-        .args(services.iter().map(|service| format!("{field}={service}")))
+        .args(units.iter().map(|unit| format!("{field}={unit}")))
         .args(
             [
                 UNIT_STARTING,
@@ -96,11 +122,95 @@ pub async fn runs(
                 UNIT_SUCCESS,
                 UNIT_FAILURE_RESULT,
                 UNIT_FAILED,
+                UNIT_STOPPED,
             ]
             .map(|id| format!("MESSAGE_ID={id}")),
         );
 
-    Ok(assemble_runs(parse_entries(&run(host, invocation).await?)))
+    let (timers, services): (Vec<Entry>, Vec<Entry>) = parse_entries(&run(host, invocation).await?)
+        .into_iter()
+        .partition(|entry| entry.unit().is_some_and(|unit| unit.ends_with(".timer")));
+    Ok(History {
+        runs: assemble_runs(services),
+        switches: assemble_switches(timers),
+    })
+}
+
+fn assemble_switches(entries: Vec<Entry>) -> HashMap<String, Vec<Switch>> {
+    let mut switches: HashMap<String, Vec<Switch>> = HashMap::new();
+    for entry in entries {
+        let (Some(at), Some(unit)) = (entry.at(), entry.unit()) else {
+            continue;
+        };
+        let on = match entry.message_id.as_deref() {
+            Some(UNIT_STARTED) => true,
+            // A stop logs both "Deactivated successfully" and "Stopped".
+            Some(UNIT_SUCCESS | UNIT_STOPPED) => false,
+            _ => continue,
+        };
+        let unit_switches = switches.entry(unit.clone()).or_default();
+        if unit_switches.last().is_none_or(|last| last.on != on) {
+            unit_switches.push(Switch { at, on });
+        }
+    }
+    switches
+}
+
+/// Stretches inside `window` when a timer was stopped while the machine
+/// was up, so its elapses there were never due. A timer is stopped at every
+/// shutdown and started at boot; such a pair brackets downtime and does not
+/// count, because elapses missed while powered off still matter for
+/// `Persistent=`. With no stop seen, the timer did not run before its first
+/// start, e.g. because it did not exist yet.
+pub fn stopped_periods(
+    switches: &[Switch],
+    active_now: bool,
+    window: Interval,
+    downtime: &[Downtime],
+) -> Vec<Interval> {
+    let near_power = |at: Timestamp, edge: fn(&Interval) -> Timestamp| {
+        downtime.iter().any(|down| {
+            down.kind == DowntimeKind::PoweredOff
+                && edge(&down.interval).duration_since(at).abs() <= BOOT_SLACK
+        })
+    };
+
+    let initially_stopped = switches.first().map_or(!active_now, |first| first.on);
+    // Start of the current stopped stretch, and whether a stop for a
+    // shutdown began it; `None` when it began before the window.
+    let mut stopped: Option<(Timestamp, Option<bool>)> =
+        initially_stopped.then_some((window.start, None));
+    let mut periods = Vec::new();
+
+    for switch in switches {
+        match (switch.on, stopped) {
+            (true, Some((from, for_shutdown))) => {
+                stopped = None;
+                let for_boot =
+                    near_power(switch.at, |down| down.end) && for_shutdown.unwrap_or(true);
+                if !for_boot && switch.at.duration_since(from) > BOOT_SLACK {
+                    periods.push(Interval {
+                        start: from,
+                        end: switch.at,
+                    });
+                }
+            }
+            (false, None) => {
+                let for_shutdown = near_power(switch.at, |down| down.start);
+                stopped = Some((switch.at, Some(for_shutdown)));
+            }
+            _ => {}
+        }
+    }
+    if let (Some((from, _)), false) = (stopped, active_now) {
+        periods.push(Interval {
+            start: from,
+            end: window.end,
+        });
+    }
+
+    periods.retain(|period| period.overlaps(&window));
+    periods
 }
 
 fn assemble_runs(entries: Vec<Entry>) -> HashMap<String, Vec<Run>> {
@@ -110,7 +220,7 @@ fn assemble_runs(entries: Vec<Entry>) -> HashMap<String, Vec<Run>> {
         let (Some(at), Some(id)) = (entry.at(), entry.message_id.as_deref()) else {
             continue;
         };
-        let Some(unit) = entry.unit.as_ref().or(entry.user_unit.as_ref()) else {
+        let Some(unit) = entry.unit() else {
             continue;
         };
         let invocation = entry.invocation.clone().or(entry.user_invocation.clone());
@@ -138,24 +248,34 @@ fn assemble_runs(entries: Vec<Entry>) -> HashMap<String, Vec<Run>> {
             // the journal cannot tell them apart. On an open run it records
             // when the start job finished, kept as a tentative end that
             // `finish_dangling` uses once the service is known to be inactive.
-            // Without "Starting" logged it opens the run. A oneshot can log
-            // it right after it ended; then it belongs to the run that ended.
+            // Without "Starting" logged it opens the run, whose start job is
+            // then already done; the user manager logs only this for simple
+            // services, so a second one on such a run starts the next run.
+            // A oneshot can log it right after it ended; then it belongs to
+            // the run that ended.
             UNIT_STARTED => {
                 let just_ended = unit_runs
                     .last()
                     .and_then(|run| run.end)
                     .is_some_and(|end| at.duration_since(end) < JUST_ENDED);
-                if open {
-                    if let Some(run) = unit_runs.last_mut() {
-                        run.end = run.end.or(Some(at));
+                match unit_runs.last_mut().filter(|_| open) {
+                    Some(run) if run.end.is_none() => run.end = Some(at),
+                    Some(run) => {
+                        run.outcome = Outcome::Success;
+                        unit_runs.push(Run {
+                            start: at,
+                            end: Some(at),
+                            outcome: Outcome::Running,
+                            invocation,
+                        });
                     }
-                } else if !just_ended {
-                    unit_runs.push(Run {
+                    None if !just_ended => unit_runs.push(Run {
                         start: at,
-                        end: None,
+                        end: Some(at),
                         outcome: Outcome::Running,
                         invocation,
-                    });
+                    }),
+                    None => {}
                 }
             }
             UNIT_SUCCESS => close(unit_runs, at, Outcome::Success, invocation),
@@ -514,5 +634,97 @@ IDX  BOOT ID                          FIRST ENTRY                 LAST ENTRY
         let runs = assemble_runs(vec![entry(5_000_000, UNIT_SUCCESS, None)]);
         let run = &runs["backup.service"][0];
         assert_eq!(Some(run.start), run.end);
+    }
+
+    fn at(mins: i64) -> Timestamp {
+        Timestamp::from_second(1_800_000_000 + mins * 60).unwrap()
+    }
+
+    fn window() -> Interval {
+        Interval {
+            start: at(0),
+            end: at(1000),
+        }
+    }
+
+    fn switch(mins: i64, on: bool) -> Switch {
+        Switch { at: at(mins), on }
+    }
+
+    #[test]
+    fn timer_did_not_run_before_its_first_start() {
+        let periods = stopped_periods(&[switch(300, true)], true, window(), &[]);
+        assert_eq!(
+            periods,
+            vec![Interval {
+                start: at(0),
+                end: at(300)
+            }]
+        );
+    }
+
+    #[test]
+    fn shutdown_and_boot_do_not_stop_a_timer() {
+        let off = Downtime {
+            interval: Interval {
+                start: at(100),
+                end: at(400),
+            },
+            kind: DowntimeKind::PoweredOff,
+        };
+        let switches = [switch(99, false), switch(401, true)];
+        assert!(stopped_periods(&switches, true, window(), &[off]).is_empty());
+        // Started at boot with nothing seen before: there all along.
+        assert!(stopped_periods(&switches[1..], true, window(), &[off]).is_empty());
+    }
+
+    #[test]
+    fn stopping_by_hand_hides_until_started_again() {
+        let switches = [switch(100, false), switch(500, true), switch(800, false)];
+        assert_eq!(
+            stopped_periods(&switches, false, window(), &[]),
+            vec![
+                Interval {
+                    start: at(100),
+                    end: at(500)
+                },
+                Interval {
+                    start: at(800),
+                    end: at(1000)
+                },
+            ]
+        );
+        // A restart is too short to hide anything.
+        let restart = [switch(100, false), switch(101, true)];
+        assert!(stopped_periods(&restart, true, window(), &[]).is_empty());
+    }
+
+    #[test]
+    fn splits_timer_switches_from_service_runs() {
+        let mut stop = entry(1_000_000, UNIT_SUCCESS, None);
+        stop.unit = Some("backup.timer".to_owned());
+        let mut stopped = entry(1_000_100, UNIT_STOPPED, None);
+        stopped.unit = Some("backup.timer".to_owned());
+        let mut start = entry(5_000_000, UNIT_STARTED, None);
+        start.unit = Some("backup.timer".to_owned());
+        let switches = assemble_switches(vec![stop, stopped, start]);
+        let switches = &switches["backup.timer"];
+        assert_eq!(switches.len(), 2, "the double stop counts once");
+        assert!(!switches[0].on && switches[1].on);
+    }
+
+    #[test]
+    fn repeated_started_without_starting_are_separate_runs() {
+        // The user manager logs only "Started" for simple services.
+        let runs = assemble_runs(vec![
+            entry(1_000_000, UNIT_STARTED, None),
+            entry(120_000_000, UNIT_STARTED, None),
+            entry(240_000_000, UNIT_STARTED, None),
+        ]);
+        let runs = &runs["backup.service"];
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].outcome, Outcome::Success);
+        assert_eq!(runs[0].end, runs[0].start.into());
+        assert_eq!(runs[2].outcome, Outcome::Running);
     }
 }

@@ -138,6 +138,7 @@ async fn load_timer(
         accuracy: duration(timer.accuracy_u_sec().await?).unwrap_or_default(),
         randomized_delay: duration(timer.randomized_delay_u_sec().await?).unwrap_or_default(),
         runs: Vec::new(),
+        stopped: Vec::new(),
     })
 }
 

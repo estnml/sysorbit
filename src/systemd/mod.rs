@@ -8,7 +8,6 @@ pub mod watch;
 
 pub mod timespan;
 
-use std::collections::HashMap;
 use std::fmt;
 
 use jiff::Timestamp;
@@ -103,18 +102,21 @@ pub async fn snapshot(host: &dyn Host, scope: Scope, window: Interval) -> Result
     expressions.sort();
     expressions.dedup();
 
-    let services: Vec<String> = timers.iter().map(|timer| timer.service.clone()).collect();
+    let units: Vec<String> = timers
+        .iter()
+        .flat_map(|timer| [timer.service.clone(), timer.id.clone()])
+        .collect();
 
-    let (occurrences, runs, downtime) = tokio::join!(
+    let (occurrences, history, downtime) = tokio::join!(
         calendar::occurrences(host, &expressions, window, capabilities),
-        journal::runs(host, scope, &services, window.start),
+        journal::history(host, scope, &units, window.start),
         journal::downtime(host, window, capabilities)
     );
 
-    let history_known = runs.is_ok();
-    let mut runs = runs.unwrap_or_else(|error| {
+    let history_known = history.is_ok();
+    let mut history = history.unwrap_or_else(|error| {
         warnings.push(format!("History unavailable: {error}"));
-        HashMap::new()
+        journal::History::default()
     });
     let downtime = downtime.unwrap_or_else(|error| {
         warnings.push(format!("Downtime unavailable: {error}"));
@@ -122,9 +124,13 @@ pub async fn snapshot(host: &dyn Host, scope: Scope, window: Interval) -> Result
     });
 
     for timer in &mut timers {
-        timer.runs = runs.remove(&timer.service).unwrap_or_default();
+        timer.runs = history.runs.remove(&timer.service).unwrap_or_default();
         if !timer.service_active {
             journal::finish_dangling(&mut timer.runs);
+        }
+        if history_known {
+            let switches = history.switches.remove(&timer.id).unwrap_or_default();
+            timer.stopped = journal::stopped_periods(&switches, timer.active, window, &downtime);
         }
         for trigger in &mut timer.calendar {
             trigger.occurrences = occurrences
@@ -305,10 +311,10 @@ mod tests {
         assert!(!output.success, "the service exits with 3");
 
         let service = format!("{unit}.service");
-        let runs = journal::runs(&host, Scope::User, std::slice::from_ref(&service), since)
+        let history = journal::history(&host, Scope::User, std::slice::from_ref(&service), since)
             .await
-            .expect("runs");
-        let run = runs[&service].last().expect("one run");
+            .expect("history");
+        let run = history.runs[&service].last().expect("one run");
         let invocation = run.invocation.as_deref().expect("invocation id");
 
         let lines = logs(&host, Scope::User, invocation).await.expect("logs");
