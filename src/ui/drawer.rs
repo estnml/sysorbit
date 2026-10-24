@@ -11,7 +11,7 @@ use jiff::tz::TimeZone;
 use super::label;
 use super::overview;
 use super::palette;
-use super::{Message, segmented};
+use super::{Message, controls, musicbox};
 use crate::model::{LogLine, Outcome, Run, Timer};
 use crate::systemd::timespan;
 
@@ -85,7 +85,7 @@ pub fn view<'a>(
     now: Timestamp,
     tz: &TimeZone,
 ) -> Element<'a, Message> {
-    let tabs = segmented(
+    let tabs = controls::segmented(
         [
             (Tab::Overview, "Overview"),
             (Tab::Runs, "Runs"),
@@ -99,11 +99,9 @@ pub fn view<'a>(
         overview::identity(timer),
         space::horizontal(),
         tabs,
-        button(text("✕").size(14))
-            .style(button::text)
-            .on_press(Message::Deselect),
+        controls::icon("✕", Message::Deselect),
     ]
-    .spacing(14)
+    .spacing(10)
     .align_y(iced::Alignment::Center);
 
     let body = match drawer.tab {
@@ -120,7 +118,8 @@ pub fn view<'a>(
     container(content.push(body))
         .width(Length::Fill)
         .height(Length::Fill)
-        .padding(16)
+        // With the border, content starts where the music box's labels do.
+        .padding([16.0, musicbox::PAD - 1.0])
         .style(|_| container::Style {
             background: Some(palette::SURFACE.into()),
             border: Border {

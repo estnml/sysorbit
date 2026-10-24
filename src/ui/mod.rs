@@ -1,6 +1,7 @@
 //! The iced application: state, messages and layout.
 
 mod clock;
+mod controls;
 mod drawer;
 mod explain;
 mod label;
@@ -15,9 +16,7 @@ use std::time::Duration;
 
 use iced::widget::canvas::{Cache, Canvas};
 use iced::widget::pane_grid::{self, PaneGrid};
-use iced::widget::{
-    Row, button, column, container, responsive, row, scrollable, space, stack, text,
-};
+use iced::widget::{column, container, responsive, row, scrollable, space, stack, text};
 use iced::{Element, Length, Subscription, Task, Theme};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
@@ -476,26 +475,24 @@ impl App {
     }
 
     fn header(&self) -> Element<'_, Message> {
-        let scopes = segmented(
+        let scopes = controls::segmented(
             [(Scope::System, "System"), (Scope::User, "User")],
             self.scope,
             Message::SetScope,
         );
-        let zooms = segmented(
+        let zooms = controls::segmented(
             Zoom::ALL.map(|zoom| (zoom, zoom.label())),
             self.zoom,
             Message::SetZoom,
         );
-        let refresh = button(
-            text(if self.loading {
+        let refresh = controls::action(
+            if self.loading {
                 "Refreshing…"
             } else {
                 "Refresh"
-            })
-            .size(13),
-        )
-        .style(button::secondary)
-        .on_press_maybe((!self.loading).then_some(Message::Refresh));
+            },
+            (!self.loading).then_some(Message::Refresh),
+        );
 
         let title = row![
             text("sysorbit").size(22),
@@ -507,13 +504,14 @@ impl App {
         // Only the controls wrap, so a fill spacer cannot push them down
         // while there is still room beside the title.
         let controls = row![scopes, zooms, refresh]
-            .spacing(16)
+            .spacing(10)
             .align_y(iced::Alignment::Center)
             .wrap()
             .vertical_spacing(10);
 
         row![title, space::horizontal(), controls]
             .spacing(16)
+            .padding([0.0, musicbox::PAD])
             .align_y(iced::Alignment::Center)
             .into()
     }
@@ -549,29 +547,7 @@ impl App {
             text(parts.join("  ·  ")).size(12).color(palette::MUTED),
         ]
         .spacing(12)
+        .padding([0.0, musicbox::PAD])
         .into()
     }
-}
-
-/// A row of buttons where the current choice is highlighted.
-fn segmented<'a, T, const N: usize>(
-    options: [(T, &'a str); N],
-    current: T,
-    on_press: fn(T) -> Message,
-) -> Element<'a, Message>
-where
-    T: Copy + PartialEq + 'a,
-{
-    let buttons = options.map(|(value, name)| {
-        button(text(name).size(13))
-            .style(if value == current {
-                button::primary
-            } else {
-                button::secondary
-            })
-            .on_press(on_press(value))
-            .into()
-    });
-
-    Row::from_iter(buttons).spacing(4).into()
 }
